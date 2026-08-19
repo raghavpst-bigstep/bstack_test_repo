@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# bstack-setup — first-run installer.
+#
+#   ./bin/setup             # install BigStep bstack GLOBALLY as a plugin -> /bstack:* everywhere
+#   ./bin/setup --project   # vendor bstack into the current repo (legacy registrar)
+#
+# Global install registers this repo as a local Claude Code marketplace and installs the
+# "bstack" plugin at user scope, so /bstack:* commands, skills, agents, and the router hook
+# are available in EVERY project. It also provisions the Python deps the doc engines need
+# and removes the conflicting gstack "bstack" alias so only this repo owns /bstack:*.
+# Idempotent — safe to re-run.
+set -uo pipefail
+
+SRC="${BASH_SOURCE[0]}"
+while [ -h "$SRC" ]; do d=$(cd -P "$(dirname "$SRC")" && pwd); SRC=$(readlink "$SRC"); [[ "$SRC" != /* ]] && SRC="$d/$SRC"; done
+BIN_DIR=$(cd -P "$(dirname "$SRC")" && pwd)
+ROOT=$(cd "$BIN_DIR/.." && pwd)
+CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+
+say()  { printf '  %s\n' "$*"; }
+head() { printf '\n==> %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
+
+# --- per-project vendor mode delegates to the legacy registrar ----------------
+if [ "${1:-}" = "--project" ]; then
+  exec bash "$ROOT/setup" "$@"
+fi
+
+head "bstack global install (source: $ROOT)"
+
+# --- 1. preflight -------------------------------------------------------------
+head "Checking required software"
+missing=0
+for t in bash git python3; do
+  command -v "$t" >/dev/null 2>&1 && say "ok   $t" || { warn "MISSING required: $t"; missing=1; }
+done
+python3 -m pip --version >/dev/null 2>&1 && say "ok   pip" || { warn "MISSING required: python3 -m pip"; missing=1; }
+HAVE_CLAUDE=0
+if command -v claude >/dev/null 2>&1; then HAVE_CLAUDE=1; say "ok   claude CLI ($(command -v claude))"; else warn "claude CLI not on PATH — needed for /bstack:* plugin install (see fallback below)"; fi
+for t in node npm nx; do command -v "$t" >/dev/null 2>&1 && say "ok   $t (optional)" || say "--   $t not found (optional)"; done
+[ "$missing" -eq 1 ] && { warn "Install the missing required tools, then re-run ./bin/setup."; exit 1; }
+
+# --- 2. Python deps (NON-FATAL — only the doc engines need these) --------------
+head "Installing Python dependencies ($ROOT/requirements.txt)"
+REQ="$ROOT/requirements.txt"
+if [ ! -f "$REQ" ]; then warn "requirements.txt not found — skipping deps"; else
+  if python3 -m pip install --user --disable-pip-version-check -q -r "$REQ" 2>/dev/null; then
+    say "installed to user site-packages"
+  elif VENV="$HOME/.bstack/venv"; python3 -m venv "$VENV" 2>/dev/null && \
+       "$VENV/bin/python" -m pip install --disable-pip-version-check -q -r "$REQ" 2>/dev/null; then
+    say "installed to $VENV (run doc engines with: $VENV/bin/python <script>)"
+  else
+    warn "could not install Python deps (offline / externally-managed). Commands+skills still"
+    warn "install below; only docx/xlsx/PDF engines need these. Later: pip install --user -r $REQ"
+  fi
+  python3 -c 'import docx, openpyxl, PIL' 2>/dev/null && say "verified: docx + openpyxl + Pillow ok" || warn "doc-engine deps not importable yet (non-blocking)"
+fi
+
+# --- 3. remove the conflicting gstack "bstack" alias --------------------------
+# ~/.claude/skills/bstack is (on this machine) a symlink to a DIFFERENT toolkit
+# (garrytan/gstack). Remove that integration so only THIS repo owns /bstack:*.
+# Removing a symlink never touches the gstack source repo it points at.
+head "Clearing conflicting gstack alias"
+LINK="$CLAUDE_HOME/skills/bstack"
+GSTACK_TARGET=""
+if [ -L "$LINK" ]; then
+  GSTACK_TARGET=$(readlink "$LINK")
+  rm -f "$LINK"; say "removed symlink $LINK -> $GSTACK_TARGET (gstack repo left untouched)"
+elif [ -e "$LINK" ]; then
+  mv "$LINK" "$LINK.pre-bstack.bak"; say "moved existing $LINK -> $LINK.pre-bstack.bak"
+else
+  say "no ~/.claude/skills/bstack alias present — nothing to clear"
+fi
+# also drop any other skill symlinks that point into the gstack repo
+if [ -n "$GSTACK_TARGET" ] && [ -d "$CLAUDE_HOME/skills" ]; then
+  gbase=$(cd "$(dirname "$GSTACK_TARGET")" 2>/dev/null && pwd)/$(basename "$GSTACK_TARGET")
+  for s in "$CLAUDE_HOME/skills"/*; do
+    [ -L "$s" ] || continue
+    case "$(readlink "$s")" in "$gbase"*|*"/gstack/"*|*"/gstack") rm -f "$s"; say "removed gstack skill link: $(basename "$s")";; esac
+  done
+fi
+
+# --- 4. install this repo as a global plugin ----------------------------------
+head "Installing the bstack plugin (user scope → every project)"
+if [ "$HAVE_CLAUDE" -eq 1 ]; then
+  # register this repo as the 'bigstep' marketplace, then install the 'bstack' plugin
+  claude plugin marketplace add "$ROOT" 2>&1 | sed 's/^/  /' || warn "marketplace add reported an issue (may already be added)"
+  if claude plugin install "bstack@bigstep" --scope user 2>&1 | sed 's/^/  /'; then
+    say "installed plugin bstack@bigstep (user scope) → /bstack:* commands"
+  else
+    warn "plugin install reported an issue — check 'claude plugin list'"
+  fi
+else
+  warn "FALLBACK (no claude CLI): registering commands/agents/skills the legacy way."
+  warn "This makes them available but WITHOUT the /bstack: prefix. Install the claude CLI,"
+  warn "then re-run ./bin/setup for proper /bstack:* namespacing."
+  bash "$ROOT/setup" | sed 's/^/  /'
+  if [ -d "$ROOT/.claude/skills" ]; then
+    mkdir -p "$CLAUDE_HOME/skills"
+    for dsk in "$ROOT/.claude/skills"/*/; do [ -d "$dsk" ] || continue; n=$(basename "$dsk"); rm -rf "$CLAUDE_HOME/skills/$n"; cp -R "$dsk" "$CLAUDE_HOME/skills/$n"; done
+    say "installed skills to $CLAUDE_HOME/skills"
+  fi
+fi
+
+# --- 5. verify + guidance -----------------------------------------------------
+head "Verify"
+for check in bstack-command-lint bstack-doc-drift; do
+  [ -x "$ROOT/bin/$check" ] && { "$ROOT/bin/$check" >/dev/null 2>&1 && say "ok   $check" || warn "$check reported drift — /bstack:improve"; }
+done
+if [ "$HAVE_CLAUDE" -eq 1 ]; then claude plugin list 2>/dev/null | grep -i bstack | sed 's/^/  /' || true; fi
+
+head "Done"
+say "In a RUNNING Claude session:  /reload-plugins   (or restart) to pick up the new plugin."
+say "Then from ANY folder:         type /bstack:  → improve, plan, review, devops, sow-generator, …"
+say "Update anytime:               ./bin/update"
+say "Vendor into one repo instead: ./bin/setup --project   (run from that repo)"

@@ -216,3 +216,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.claude/state/
+docs/solutions/hook-events.jsonl

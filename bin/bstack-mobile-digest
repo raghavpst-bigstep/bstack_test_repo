@@ -1,0 +1,553 @@
+#!/usr/bin/env bash
+# bstack-mobile-digest — deterministic summary of a mobile app's platform config.
+#
+# Emits human-readable text by default; pass --json for machine-readable JSON.
+# Exit code: 0 = clean (or no targets), 2 = digest emitted with CRITICAL findings.
+# Portable: targets BSD awk / BSD sed / bash 3.2 (macOS stock).
+#
+# Usage:
+#   bstack-mobile-digest                scan apps/mobile-* / apps/native-*
+#   bstack-mobile-digest <path>         scan a single mobile app dir
+#   bstack-mobile-digest --diff         scan only mobile files changed vs. merge-base
+#   bstack-mobile-digest --json [path|--diff]   emit JSON instead of text
+
+set -uo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$REPO_ROOT"
+
+OUTPUT="text"
+if [ "${1:-}" = "--json" ]; then OUTPUT="json"; shift; fi
+
+# Collect TARGETS portably (no bash-4 mapfile).
+TARGETS=()
+case "${1:-}" in
+  --diff)
+    if base=$(git merge-base origin/main HEAD 2>/dev/null); then
+      BASE="$base"
+    elif git rev-parse --verify --quiet main >/dev/null 2>&1; then
+      BASE=$(git merge-base main HEAD 2>/dev/null || echo main)
+    else
+      BASE="HEAD~1"
+      echo "  (warning: no origin/main; falling back to HEAD~1)" >&2
+    fi
+    export BSTACK_DIGEST_BASE="$BASE"
+    while IFS= read -r line; do
+      [ -n "$line" ] && TARGETS+=("$line")
+    done < <(git diff --name-only "$BASE"...HEAD 2>/dev/null \
+      | grep -E '^apps/(mobile|native-android|native-ios)-[^/]+/' \
+      | cut -d/ -f1-2 | sort -u)
+    ;;
+  "")
+    while IFS= read -r line; do
+      [ -n "$line" ] && TARGETS+=("$line")
+    done < <(find apps -maxdepth 1 -type d \
+      \( -name 'mobile-*' -o -name 'native-android-*' -o -name 'native-ios-*' \) 2>/dev/null \
+      | sort -u)
+    ;;
+  *)
+    TARGETS+=("$1")
+    ;;
+esac
+
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+  if [ "$OUTPUT" = "json" ]; then echo '{"targets":[],"critical":0}'; else echo "  (no mobile apps found)"; fi
+  exit 0
+fi
+
+# ----- Output helpers ----------------------------------------------------------
+CRITICAL=0
+JSON_BUF=""
+emit() {
+  if [ "$OUTPUT" = "text" ]; then
+    printf "  %-22s %s\n" "$1" "$2"
+  else
+    val=$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+    JSON_BUF="$JSON_BUF    \"$1\": \"$val\",\n"
+  fi
+}
+section() {
+  if [ "$OUTPUT" = "text" ]; then echo ""; echo "▸ $1"; else
+    if [ -n "$JSON_BUF" ]; then echo -e "  },"; fi
+    echo "  \"$1\": {"
+    JSON_BUF=" "
+  fi
+}
+crit() { CRITICAL=$((CRITICAL+1)); emit "$1" "$2"; }
+
+# ----- Portable plist value extraction (handles same-line AND next-line forms)
+# Strips XML comments first to avoid false matches.
+plist_string_value() {
+  local key="$1" file="$2"
+  sed 's/<!--.*-->//g' "$file" 2>/dev/null \
+    | awk -v k="$key" '
+        $0 ~ "<key>" k "</key>" {
+          line = $0
+          # Same-line <string>...</string>
+          if (line ~ "<string>") {
+            v = line; sub(/.*<string>/, "", v); sub(/<\/string>.*/, "", v)
+            print v; exit
+          }
+          # Same-line <true/> or <false/>
+          if (line ~ /<(true|false)\/>/) {
+            v = line
+            if (match(v, /<true\/>/))  { print "true"; exit }
+            if (match(v, /<false\/>/)) { print "false"; exit }
+          }
+          # Otherwise read forward
+          while ((getline next_line) > 0) {
+            if (next_line ~ "<string>") {
+              v = next_line; sub(/.*<string>/, "", v); sub(/<\/string>.*/, "", v)
+              print v; exit
+            }
+            if (next_line ~ /<true\/>/)  { print "true"; exit }
+            if (next_line ~ /<false\/>/) { print "false"; exit }
+            if (next_line ~ /<dict>/ || next_line ~ /<array>/) exit
+          }
+        }
+      '
+}
+
+# ----- Strip XML comments helper for AndroidManifest reads
+strip_xml_comments() {
+  sed 's/<!--.*-->//g' "$1" 2>/dev/null
+}
+
+# ----- Brace-aware extractor: extract `block { ... }` from a Gradle file
+# (handles nested braces correctly by tracking depth)
+gradle_block() {
+  local block="$1" file="$2"
+  awk -v B="$block" '
+    BEGIN { depth = 0; capture = 0 }
+    {
+      if (!capture) {
+        if ($0 ~ B "[[:space:]]*\\{") {
+          capture = 1
+          # count braces on this line after the opener
+          line = $0
+          sub(".*" B "[[:space:]]*\\{", "", line)
+          for (i = 1; i <= length(line); i++) {
+            c = substr(line, i, 1)
+            if (c == "{") depth++
+            if (c == "}") depth--
+          }
+          depth++  # for the opener
+          next
+        }
+      } else {
+        for (i = 1; i <= length($0); i++) {
+          c = substr($0, i, 1)
+          if (c == "{") depth++
+          if (c == "}") { depth--; if (depth == 0) { capture = 0; next } }
+        }
+        if (capture) print
+      }
+    }
+  ' "$file" 2>/dev/null
+}
+
+# ----- Per-target scan ---------------------------------------------------------
+if [ "$OUTPUT" = "json" ]; then echo "{"; fi
+
+for app in "${TARGETS[@]}"; do
+  # Skip libs/mobile-* — those are libraries, not apps; no manifests expected.
+  case "$app" in libs/mobile-*) continue ;; esac
+  [ -d "$app" ] || continue
+  section "$app"
+
+  # ---------- Android (AndroidManifest.xml) ----------
+  # Prefer src/main/AndroidManifest.xml (release source); fall back to first found.
+  manifest=$(find "$app" -path '*/src/main/AndroidManifest.xml' -not -path '*/build/*' 2>/dev/null | head -1 || true)
+  [ -z "${manifest:-}" ] && manifest=$(find "$app" -maxdepth 4 -name AndroidManifest.xml -not -path '*/build/*' -not -path '*/src/debug/*' -not -path '*/src/test/*' -not -path '*/src/androidTest/*' 2>/dev/null | head -1 || true)
+  if [ -n "${manifest:-}" ]; then
+    emit "platform" "android"
+    emit "manifest" "$manifest"
+    manifest_clean=$(strip_xml_comments "$manifest")
+
+    perms=$(printf '%s\n' "$manifest_clean" | grep -oE 'android:name="android\.permission\.[A-Z_]+"' \
+            | sed -E 's/.*permission\.([A-Z_]+).*/\1/' | sort -u | paste -sd, - || true)
+    [ -n "${perms:-}" ] && emit "perms" "$perms" || emit "perms" "(none)"
+
+    dangerous=$(printf '%s' "${perms:-}" | tr ',' '\n' | grep -E '^(CAMERA|RECORD_AUDIO|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|ACCESS_BACKGROUND_LOCATION|READ_CONTACTS|WRITE_CONTACTS|READ_CALENDAR|WRITE_CALENDAR|READ_SMS|SEND_SMS|READ_PHONE_STATE|CALL_PHONE|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|READ_MEDIA_IMAGES|READ_MEDIA_VIDEO|READ_MEDIA_AUDIO|READ_MEDIA_VISUAL_USER_SELECTED|BODY_SENSORS|BODY_SENSORS_BACKGROUND|POST_NOTIFICATIONS|BLUETOOTH_CONNECT|BLUETOOTH_SCAN|BLUETOOTH_ADVERTISE|NEARBY_WIFI_DEVICES|ACTIVITY_RECOGNITION|UWB_RANGING|MANAGE_EXTERNAL_STORAGE|SCHEDULE_EXACT_ALARM|USE_EXACT_ALARM|SYSTEM_ALERT_WINDOW|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES)$' | paste -sd, - || true)
+    [ -n "${dangerous:-}" ] && emit "perms.dangerous" "$dangerous"
+
+    # Exported components — portable awk with RS=">"; comments stripped above.
+    exported_names=$(printf '%s' "$manifest_clean" | awk '
+      BEGIN { RS=">" }
+      /<(activity|service|receiver|provider)[ \t\n]/ && /android:exported="true"/ && !/android:permission=/ && /android:name="/ {
+        kind = $0
+        sub(/.*<[ \t\n]*/, "", kind); sub(/[[:space:]].*/, "", kind)
+        name = $0
+        sub(/.*android:name="/, "", name); sub(/".*/, "", name)
+        if (kind != "" && name != "") printf "%s:%s ", kind, name
+      }
+    ' | sed 's/ *$//')
+    if [ -n "${exported_names:-}" ]; then
+      emit "exported.unguarded" "$exported_names"
+    else
+      emit "exported.unguarded" "(none — or all have android:permission=)"
+    fi
+
+    # Foreground service types
+    fgs_types=$(printf '%s\n' "$manifest_clean" | grep -oE 'android:foregroundServiceType="[^"]+"' \
+                | sed -E 's/.*="([^"]+)".*/\1/' | sort -u | paste -sd, - || true)
+    [ -n "${fgs_types:-}" ] && emit "fgs.types" "$fgs_types"
+
+    if printf '%s\n' "$manifest_clean" | grep -q '<queries'; then emit "queries.block" "present"; fi
+
+    if printf '%s\n' "$manifest_clean" | grep -qE 'android:allowBackup="false"'; then
+      emit "allowBackup" "false (good)"
+    elif printf '%s\n' "$manifest_clean" | grep -qE 'android:allowBackup="true"'; then
+      emit "allowBackup" "true (review)"
+    fi
+
+    if printf '%s\n' "$manifest_clean" | grep -qE 'android:usesCleartextTraffic="true"'; then
+      emit "cleartext" "TRUE (review § 10.6)"
+    else
+      emit "cleartext" "false / unset"
+    fi
+
+    if printf '%s\n' "$manifest_clean" | grep -qE 'android:debuggable="true"'; then
+      crit "debuggable" "TRUE (CRITICAL for release — § 10.7)"
+    fi
+
+    # SDK levels + signing + flavors (anchor to app/build.gradle*)
+    gradle=$(find "$app" -path '*/app/build.gradle*' -not -path '*/build/*' 2>/dev/null | head -1 || true)
+    [ -z "${gradle:-}" ] && gradle=$(find "$app" -maxdepth 4 -name 'build.gradle*' -not -path '*/build/*' -not -path '*/buildSrc/*' 2>/dev/null | head -1 || true)
+    if [ -n "${gradle:-}" ]; then
+      ts=$(grep -oE 'targetSdk(Version)?[[:space:]=]+[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1 || true)
+      ms=$(grep -oE 'minSdk(Version)?[[:space:]=]+[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1 || true)
+      cs=$(grep -oE 'compileSdk(Version)?[[:space:]=]+[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1 || true)
+      vc=$(grep -oE 'versionCode[[:space:]=]+[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1 || true)
+      vn=$(grep -oE "versionName[[:space:]=]+['\"][^'\"]+['\"]" "$gradle" | head -1 || true)
+      ai=$(grep -oE "applicationId[[:space:]=]+['\"][^'\"]+['\"]" "$gradle" | head -1 | sed -E "s/.*['\"]([^'\"]+)['\"].*/\1/" || true)
+      [ -n "${ts:-}" ] && emit "targetSdk" "$ts"
+      [ -n "${ms:-}" ] && emit "minSdk" "$ms"
+      [ -n "${cs:-}" ] && emit "compileSdk" "$cs"
+      [ -n "${vc:-}" ] && emit "versionCode" "$vc"
+      [ -n "${vn:-}" ] && emit "versionName" "$vn"
+      [ -n "${ai:-}" ] && emit "applicationId" "$ai"
+
+      flavors_block=$(gradle_block 'productFlavors' "$gradle")
+      flavors=$(printf '%s\n' "$flavors_block" | grep -oE '^[[:space:]]*[a-zA-Z][a-zA-Z0-9_]*[[:space:]]*\{' \
+                | sed -E 's/[[:space:]{]//g' | sort -u | paste -sd, - || true)
+      [ -n "${flavors:-}" ] && emit "flavors" "$flavors"
+
+      if grep -qE 'minifyEnabled[[:space:]]+true' "$gradle"; then
+        emit "release.minify" "true (good — § 10.7)"
+      else
+        emit "release.minify" "false or unset (review § 10.7)"
+      fi
+
+      # signingConfigs with inline secrets — use brace-aware extractor
+      signing_block=$(gradle_block 'signingConfigs' "$gradle")
+      inline_signing=$(printf '%s\n' "$signing_block" \
+        | grep -E '(storePassword|keyPassword|keyAlias|storeFile)' \
+        | grep -vE 'System\.getenv|project\.findProperty|System\.getProperty|providers\.gradleProperty|providers\.environmentVariable' \
+        | head -10 || true)
+      if [ -n "${inline_signing:-}" ]; then
+        crit "signingConfigs" "INLINE secrets found (CRITICAL — § 3.4)"
+        if [ "$OUTPUT" = "text" ]; then printf '%s\n' "$inline_signing" | sed 's/^/                         /'; fi
+      fi
+
+      # Baseline Profile presence (§ 10.16 / ADR-001)
+      if find "$app" -maxdepth 5 -name 'baseline-prof.txt' 2>/dev/null | grep -q . \
+         || find "$app" -maxdepth 5 -type d -name 'baselineProfile' 2>/dev/null | grep -q .; then
+        emit "baselineProfile" "present"
+      else
+        emit "baselineProfile" "MISSING (review § 10.16 — required for release on native-android)"
+      fi
+    fi
+  fi
+
+  # ---------- iOS (Info.plist + entitlements) ----------
+  # Prefer the main app target's Info.plist; skip Tests / Pods / build.
+  plist=$(find "$app" -maxdepth 4 -name 'Info.plist' \
+            -not -path '*/Pods/*' -not -path '*/build/*' \
+            -not -path '*Tests/*' -not -path '*UITests/*' 2>/dev/null | head -1 || true)
+  if [ -n "${plist:-}" ]; then
+    emit "platform" "ios"
+    emit "plist" "$plist"
+
+    # Purpose strings — extract key AND value (so phrasing can be audited per § 11.12)
+    purpose_keys=$(grep -oE 'NS[A-Za-z]+UsageDescription' "$plist" | sort -u || true)
+    if [ -n "${purpose_keys:-}" ]; then
+      while IFS= read -r pk; do
+        [ -z "$pk" ] && continue
+        pv=$(plist_string_value "$pk" "$plist")
+        emit "purpose.$pk" "${pv:-(empty)}"
+      done <<EOF
+$purpose_keys
+EOF
+    else
+      emit "purpose-strings" "(none)"
+    fi
+
+    # ATS — list exception domains using portable awk (track <dict> nesting)
+    if grep -q 'NSAllowsArbitraryLoads' "$plist"; then
+      arbitrary=$(plist_string_value "NSAllowsArbitraryLoads" "$plist")
+      emit "ats.arbitraryLoads" "${arbitrary:-?}"
+      exc_domains=$(sed 's/<!--.*-->//g' "$plist" \
+        | awk '
+            /<key>NSExceptionDomains<\/key>/ { in_ed = 1; depth = 0; next }
+            in_ed {
+              # Count dict opens/closes inside this section
+              n_open = gsub(/<dict>/, "&"); for (i=0; i<n_open; i++) depth++
+              n_close = gsub(/<\/dict>/, "&"); for (i=0; i<n_close; i++) depth--
+              if (depth == 1 && $0 ~ /<key>[A-Za-z0-9.-]+<\/key>/) {
+                key = $0; sub(/.*<key>/, "", key); sub(/<\/key>.*/, "", key)
+                print key
+              }
+              if (depth < 0) in_ed = 0
+            }
+          ' | head -20 | paste -sd, - || true)
+      [ -n "${exc_domains:-}" ] && emit "ats.exceptionDomains" "$exc_domains"
+      emit "ats" "EXCEPTION present (review § 11.3)"
+    else
+      emit "ats" "default (on)"
+    fi
+
+    url_schemes=$(awk '/<key>CFBundleURLSchemes<\/key>/{f=1;next} f&&/<\/array>/{f=0} f&&/<string>/{gsub(/.*<string>|<\/string>.*/,""); print}' "$plist" | paste -sd, - || true)
+    queries=$(awk '/<key>LSApplicationQueriesSchemes<\/key>/{f=1;next} f&&/<\/array>/{f=0} f&&/<string>/{gsub(/.*<string>|<\/string>.*/,""); print}' "$plist" | head -15 | paste -sd, - || true)
+    [ -n "${url_schemes:-}" ] && emit "urlSchemes" "$url_schemes"
+    [ -n "${queries:-}" ] && emit "queriesSchemes" "$queries"
+
+    # Encryption export compliance — use portable plist value reader
+    if grep -q '<key>ITSAppUsesNonExemptEncryption</key>' "$plist"; then
+      enc=$(plist_string_value "ITSAppUsesNonExemptEncryption" "$plist")
+      emit "encryption.declared" "${enc:-?}"
+    else
+      emit "encryption.declared" "MISSING (review § 11.13)"
+    fi
+
+    grep -q 'UIApplicationSceneManifest' "$plist" && emit "sceneManifest" "present"
+
+    # Privacy Manifest — app-level (§ 11.11)
+    privacy=$(find "$app" -maxdepth 6 -name 'PrivacyInfo.xcprivacy' -not -path '*/Pods/*' -not -path '*/build/*' 2>/dev/null | head -1 || true)
+    if [ -n "${privacy:-}" ]; then
+      emit "privacyManifest.app" "$privacy"
+    else
+      crit "privacyManifest.app" "MISSING (CRITICAL — § 11.11 / ITMS-91053)"
+    fi
+
+    # Privacy Manifest — Pods / xcframeworks (§ 11.11 / ITMS-91056 third-party)
+    if [ -d "$app/ios/Pods" ] || [ -d "$app/Pods" ]; then
+      pods_root=$(find "$app" -maxdepth 4 -type d -name 'Pods' -not -path '*/build/*' 2>/dev/null | head -1 || true)
+      if [ -n "${pods_root:-}" ]; then
+        pods_missing=$(find "$pods_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r pod; do
+          name=$(basename "$pod")
+          if [ "$name" = "Target Support Files" ] || [ "$name" = "Headers" ] || [ "$name" = "Local Podspecs" ] || [ "$name" = "Manifest.lock" ]; then
+            continue
+          fi
+          if ! find "$pod" -maxdepth 6 -name 'PrivacyInfo.xcprivacy' 2>/dev/null | grep -q .; then
+            echo "$name"
+          fi
+        done | head -20 | paste -sd, - || true)
+        if [ -n "${pods_missing:-}" ]; then
+          crit "privacyManifest.pods" "MISSING in: $pods_missing (CRITICAL — § 11.11 / ITMS-91056)"
+        else
+          emit "privacyManifest.pods" "all Pods have PrivacyInfo.xcprivacy"
+        fi
+      fi
+    fi
+
+    bg=$(awk '/<key>UIBackgroundModes<\/key>/{f=1;next} f&&/<\/array>/{f=0} f&&/<string>/{gsub(/.*<string>|<\/string>.*/,""); print}' "$plist" | paste -sd, - || true)
+    [ -n "${bg:-}" ] && emit "background-modes" "$bg"
+
+    cfb=$(plist_string_value "CFBundleShortVersionString" "$plist")
+    bld=$(plist_string_value "CFBundleVersion" "$plist")
+    [ -n "${cfb:-}" ] && emit "shortVersion" "$cfb"
+    [ -n "${bld:-}" ] && emit "buildNumber" "$bld"
+
+    # iOS app extensions (*.appex / NSExtension) — § L
+    extensions=$(find "$app" -maxdepth 5 -name '*.appex' -not -path '*/build/*' 2>/dev/null | paste -sd, - || true)
+    if [ -z "${extensions:-}" ]; then
+      # Or by Info.plist having NSExtension dict (pre-build)
+      extensions=$(find "$app" -maxdepth 5 -name 'Info.plist' -not -path '*/Pods/*' -not -path '*/build/*' -not -path '*Tests/*' 2>/dev/null | while read -r p; do
+        if grep -q '<key>NSExtension<' "$p" 2>/dev/null; then echo "$p"; fi
+      done | paste -sd, - || true)
+    fi
+    [ -n "${extensions:-}" ] && emit "appExtensions" "$extensions"
+
+    ent=$(find "$app" -maxdepth 4 -name '*.entitlements' -not -path '*/Pods/*' 2>/dev/null | head -1 || true)
+    if [ -n "${ent:-}" ]; then
+      caps=$(grep -oE '<key>[^<]+</key>' "$ent" | sed -E 's/<\/?key>//g' | sort -u | paste -sd, - || true)
+      emit "entitlements" "$ent"
+      [ -n "${caps:-}" ] && emit "capabilities" "$caps"
+
+      apsenv=$(plist_string_value "aps-environment" "$ent")
+      if [ -n "${apsenv:-}" ]; then
+        if [ "$apsenv" = "development" ]; then
+          emit "aps-environment" "development (REVIEW — § 11.16: must be production for store builds)"
+        else
+          emit "aps-environment" "$apsenv"
+        fi
+      fi
+
+      assoc=$(awk '/<key>com.apple.developer.associated-domains<\/key>/{f=1;next} f&&/<\/array>/{f=0} f&&/<string>/{gsub(/.*<string>|<\/string>.*/,""); print}' "$ent" | paste -sd, - || true)
+      [ -n "${assoc:-}" ] && emit "associated-domains" "$assoc"
+
+      grep -q 'com.apple.developer.applesignin' "$ent" && emit "siwa" "capability present"
+
+      # App Groups (relevant when extensions exist)
+      app_groups=$(awk '/<key>com.apple.security.application-groups<\/key>/{f=1;next} f&&/<\/array>/{f=0} f&&/<string>/{gsub(/.*<string>|<\/string>.*/,""); print}' "$ent" | paste -sd, - || true)
+      [ -n "${app_groups:-}" ] && emit "appGroups" "$app_groups"
+    fi
+  fi
+
+  # ---------- React Native / Expo ----------
+  appjson=$(find "$app" -maxdepth 2 -name 'app.json' 2>/dev/null | head -1 || true)
+  if [ -n "${appjson:-}" ]; then
+    emit "platform" "react-native (expo)"
+    emit "app.json" "$appjson"
+    name=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' "$appjson" | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    ver=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$appjson" | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    [ -n "${name:-}" ] && emit "app.name" "$name"
+    [ -n "${ver:-}" ] && emit "app.version" "$ver"
+    new_arch=$(grep -oE '"newArchEnabled"[[:space:]]*:[[:space:]]*(true|false)' "$appjson" | head -1 || true)
+    [ -n "${new_arch:-}" ] && emit "newArchEnabled" "$new_arch"
+
+    # Expo-managed versionCode / buildNumber (§ 16 fix: source-of-truth for managed apps)
+    expo_vc=$(grep -oE '"versionCode"[[:space:]]*:[[:space:]]*[0-9]+' "$appjson" | head -1 | grep -oE '[0-9]+' || true)
+    expo_bn=$(grep -oE '"buildNumber"[[:space:]]*:[[:space:]]*"[^"]+"' "$appjson" | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    [ -n "${expo_vc:-}" ] && emit "expo.versionCode" "$expo_vc"
+    [ -n "${expo_bn:-}" ] && emit "expo.buildNumber" "$expo_bn"
+
+    # runtimeVersion — handle both "string" and {"policy":"..."} forms
+    rv=$(awk '
+      /"runtimeVersion"[[:space:]]*:/ {
+        line = $0
+        # Strip up to the colon
+        sub(/.*"runtimeVersion"[[:space:]]*:[[:space:]]*/, "", line)
+        if (line ~ /^"/) {
+          # String form
+          sub(/^"/, "", line); sub(/".*/, "", line)
+          print "string:" line; exit
+        }
+        if (line ~ /^\{/) {
+          # Object form — read until matching }
+          buf = line; depth = 0
+          for (i=1; i<=length(buf); i++) { c = substr(buf,i,1); if (c=="{") depth++; if (c=="}") depth-- }
+          while (depth > 0 && (getline next_line) > 0) {
+            buf = buf next_line
+            for (i=1; i<=length(next_line); i++) { c = substr(next_line,i,1); if (c=="{") depth++; if (c=="}") depth-- }
+          }
+          # Extract policy value
+          if (buf ~ /"policy"[[:space:]]*:[[:space:]]*"[^"]+"/) {
+            pol = buf; sub(/.*"policy"[[:space:]]*:[[:space:]]*"/, "", pol); sub(/".*/, "", pol)
+            print "policy:" pol; exit
+          }
+          print "object:?"; exit
+        }
+      }
+    ' "$appjson")
+    [ -n "${rv:-}" ] && emit "runtimeVersion" "$rv"
+
+    # Expo plugins (config plugins → may bump native fingerprint)
+    plugins=$(awk '/"plugins"[[:space:]]*:[[:space:]]*\[/{f=1;next} f&&/^\s*\]/{f=0} f' "$appjson" \
+      | grep -oE '"[a-zA-Z0-9@/_.-]+"' | tr -d '"' | sort -u | paste -sd, - || true)
+    [ -n "${plugins:-}" ] && emit "expo.plugins" "$plugins"
+
+    # Hermes (§ 12 RN rule) — Expo defaults Hermes on; flag explicit jsEngine="jsc"
+    if grep -qE '"jsEngine"[[:space:]]*:[[:space:]]*"jsc"' "$appjson"; then
+      emit "jsEngine" "jsc (REVIEW — § 12.18 mandates Hermes for RN)"
+    else
+      emit "jsEngine" "hermes (default)"
+    fi
+  fi
+
+  # package.json — Expo SDK + native-impacting deps delta (§ 12.4 / § 12.15)
+  pkgjson=$(find "$app" -maxdepth 2 -name 'package.json' 2>/dev/null | head -1 || true)
+  if [ -n "${pkgjson:-}" ]; then
+    expo_sdk=$(grep -oE '"expo"[[:space:]]*:[[:space:]]*"[^"]+"' "$pkgjson" | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
+    [ -n "${expo_sdk:-}" ] && emit "expo.sdk" "$expo_sdk"
+
+    # Extract only the dependencies object (not devDependencies) — portable awk
+    deps_block=$(awk '
+      BEGIN { depth = 0; capture = 0 }
+      /"dependencies"[[:space:]]*:[[:space:]]*\{/ && !capture {
+        capture = 1
+        line = $0
+        sub(/.*"dependencies"[[:space:]]*:[[:space:]]*\{/, "", line)
+        depth = 1
+        for (i=1; i<=length(line); i++) { c = substr(line,i,1); if (c=="{") depth++; if (c=="}") depth-- }
+        if (depth > 0) print line
+        if (depth == 0) capture = 0
+        next
+      }
+      capture {
+        for (i=1; i<=length($0); i++) { c = substr($0,i,1); if (c=="{") depth++; if (c=="}") { depth--; if (depth==0) { capture=0; next } } }
+        print
+      }
+    ' "$pkgjson")
+    cur_deps=$(printf '%s\n' "$deps_block" \
+      | grep -oE '"(expo-[a-zA-Z0-9-]+|react-native-[a-zA-Z0-9-]+|@react-native-[a-zA-Z0-9/-]+|@expo/[a-zA-Z0-9-]+)"' \
+      | tr -d '"' | sort -u || true)
+
+    if [ -n "${BSTACK_DIGEST_BASE:-}" ] && git rev-parse --verify --quiet "$BSTACK_DIGEST_BASE" >/dev/null 2>&1; then
+      base_pkg=$(git show "$BSTACK_DIGEST_BASE:$pkgjson" 2>/dev/null || true)
+      if [ -n "${base_pkg:-}" ]; then
+        base_deps_block=$(printf '%s\n' "$base_pkg" | awk '
+          BEGIN { depth=0; capture=0 }
+          /"dependencies"[[:space:]]*:[[:space:]]*\{/ && !capture {
+            capture=1
+            line=$0; sub(/.*"dependencies"[[:space:]]*:[[:space:]]*\{/, "", line); depth=1
+            for (i=1;i<=length(line);i++){c=substr(line,i,1); if(c=="{") depth++; if(c=="}") depth--}
+            if (depth>0) print line
+            if (depth==0) capture=0
+            next
+          }
+          capture {
+            for (i=1;i<=length($0);i++){c=substr($0,i,1); if(c=="{") depth++; if(c=="}"){depth--; if(depth==0){capture=0;next}}}
+            print
+          }
+        ')
+        base_deps=$(printf '%s\n' "$base_deps_block" \
+          | grep -oE '"(expo-[a-zA-Z0-9-]+|react-native-[a-zA-Z0-9-]+|@react-native-[a-zA-Z0-9/-]+|@expo/[a-zA-Z0-9-]+)"' \
+          | tr -d '"' | sort -u || true)
+        added=$(comm -23 <(printf '%s\n' "$cur_deps") <(printf '%s\n' "$base_deps") | grep -v '^$' | paste -sd, - || true)
+        removed=$(comm -13 <(printf '%s\n' "$cur_deps") <(printf '%s\n' "$base_deps") | grep -v '^$' | paste -sd, - || true)
+        if [ -n "${added:-}" ]; then crit "native-deps.added" "$added (CHANGES OTA fingerprint — § 12.15)"; fi
+        if [ -n "${removed:-}" ]; then crit "native-deps.removed" "$removed (CHANGES OTA fingerprint — § 12.15)"; fi
+        if [ -z "${added:-}" ] && [ -z "${removed:-}" ]; then emit "native-deps.delta" "none (OTA-safe wrt package.json dependencies)"; fi
+      else
+        cnt=$(printf '%s\n' "$cur_deps" | grep -c . 2>/dev/null || true); [ -z "${cnt:-}" ] && cnt=0
+        [ -z "${cur_deps:-}" ] && cnt=0
+        emit "native-deps.total" "$cnt (base package.json unreadable; diff unknown)"
+      fi
+    else
+      cnt=$(printf '%s\n' "$cur_deps" | grep -c . 2>/dev/null || true); [ -z "${cnt:-}" ] && cnt=0
+      [ -z "${cur_deps:-}" ] && cnt=0
+      emit "native-deps.total" "$cnt"
+    fi
+  fi
+
+  easjson=$(find "$app" -maxdepth 2 -name 'eas.json' 2>/dev/null | head -1 || true)
+  if [ -n "${easjson:-}" ]; then
+    emit "eas.json" "$easjson"
+    profiles=$(grep -oE '"(development|preview|production)"[[:space:]]*:' "$easjson" | sed -E 's/[":]//g' | sort -u | paste -sd, - || true)
+    [ -n "${profiles:-}" ] && emit "eas.profiles" "$profiles"
+  fi
+
+  # ---------- Repo hygiene — signing material that must NEVER be in repo (§ 3.4) ----------
+  forbidden=$(find "$app" -maxdepth 6 \( \
+      -name '*.keystore' -o -name '*.jks' -o -name '*.p12' \
+      -o -name '*.mobileprovision' -o -name 'AuthKey_*.p8' \
+    \) -not -path '*/build/*' -not -path '*/.git/*' 2>/dev/null | head -20 || true)
+  if [ -n "${forbidden:-}" ]; then
+    crit "secrets.in.repo" "FOUND (CRITICAL — § 3.4)"
+    if [ "$OUTPUT" = "text" ]; then printf '%s\n' "$forbidden" | sed 's/^/                         /'; fi
+  fi
+done
+
+if [ "$OUTPUT" = "json" ]; then
+  if [ -n "${JSON_BUF:-}" ]; then echo -e "  }"; fi
+  printf '},\n"critical": %d\n}\n' "$CRITICAL"
+else
+  echo ""
+  echo "  scanned ${#TARGETS[@]} mobile app(s); $CRITICAL CRITICAL finding(s)."
+fi
+
+# Non-zero exit on CRITICAL so callers (pre-push, CI) can gate.
+if [ "$CRITICAL" -gt 0 ]; then exit 2; fi
+exit 0

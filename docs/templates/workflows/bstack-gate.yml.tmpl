@@ -1,0 +1,108 @@
+# bstack gate of record — G-01 / G-02.
+#
+# Every control bstack ships was previously bypassable: the checkers existed and
+# returned correct exit codes, but nothing invoked them. PQG put its gates in local
+# git hooks, which are opt-in per clone; Possibl's correction #2 ruled that the
+# enforcing run must be server-side. This workflow is that enforcing run.
+#
+# Job names below become the required status-check CONTEXTS in branch protection.
+# Keep them stable — renaming a job silently detaches it from the protection rule
+# and the gate stops gating while still appearing green.
+#
+# bash + python3 only. bstack has no package.json; do not add a Node setup step.
+#
+# CONSUMING-REPO VARIANT. bstack-doc-drift is deliberately absent: it reconciles the
+# command surface against readme.md / MANIFEST.md, which are bstack's own indexes and
+# correctly do not exist here. Running it in a consuming repo fails 4/8 checks purely
+# from the environment.
+
+name: bstack-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bstack-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  command-lint:
+    name: command-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bin/bstack-command-lint
+        run: bin/bstack-command-lint
+
+  eval:
+    name: eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bin/bstack-eval
+        run: bin/bstack-eval
+
+
+  ddd-boundaries:
+    name: ddd-boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --diff needs the base commit; a shallow clone has no merge base.
+          fetch-depth: 0
+      - name: bin/bstack-ddd-check --diff
+        run: bin/bstack-ddd-check --diff
+
+  migration-safety:
+    name: migration-safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: bin/bstack-migrate-check on changed migrations
+        run: |
+          set -uo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE" ] || BASE="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD -- '*migrations*' | grep -E '\.ts$' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "  no migration files changed — nothing to check"
+            exit 0
+          fi
+          rc=0
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            echo "==> $f"
+            bin/bstack-migrate-check "$f" || rc=1
+          done <<< "$CHANGED"
+          exit $rc
+
+  # Reports whether the target branch is actually protected. Advisory here because
+  # reading protection requires repo admin and CI's default token does not have it
+  # (GitHub answers 404, not 403, so a hard failure would be indistinguishable from
+  # "unprotected" — the exact false negative bstack-protect exists to avoid).
+  # Gate on it only where a token with admin is provided.
+  branch-protection:
+    name: branch-protection
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: bin/bstack-protect --verify
+        env:
+          GH_TOKEN: ${{ secrets.BSTACK_PROTECT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          bin/bstack-protect --verify --repo "${{ github.repository }}" \
+            --branch "${{ github.event.pull_request.base.ref || github.ref_name }}" || rc=$?
+          case "${rc:-0}" in
+            0) echo "::notice::branch protection compliant" ;;
+            5) echo "::warning::INDETERMINATE — token lacks admin, so protection state is unreadable. Not reporting a verdict." ;;
+            *) echo "::error::branch protection non-compliant (exit ${rc})" ; exit "${rc}" ;;
+          esac

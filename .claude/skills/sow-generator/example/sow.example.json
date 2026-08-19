@@ -1,0 +1,87 @@
+{
+  "meta": {
+    "title": "Statement of Work",
+    "subtitle": "Prepared by BigStep Technologies for Acme Retail Pvt. Ltd. — Loyalty Platform, Phase 1.",
+    "doc_ref": "BST-SOW-2026-014",
+    "version": "1.0",
+    "classification": "Confidential"
+  },
+  "sections": [
+    {
+      "heading": "Engagement Summary",
+      "blocks": [
+        {"type": "para", "text": "BigStep Technologies will design and build a customer loyalty platform for Acme Retail, covering a customer-facing mobile app, an admin web console, and the supporting backend and data services. This SOW defines the scope, deliverables, timeline, commercials, and assumptions for Phase 1."},
+        {"type": "fields", "pairs": [
+          ["Client", "Acme Retail Pvt. Ltd."], ["Engagement", "Fixed-scope, Phase 1"],
+          ["Duration", "14 weeks"], ["Start", "On signature + advance"],
+          ["Delivery model", "Agile, 2-week sprints"], ["Primary contact", "BigStep Delivery Lead"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Scope of Work",
+      "blocks": [
+        {"type": "subhead", "text": "In scope"},
+        {"type": "bullets", "items": [
+          "Customer mobile app (React Native + Expo): signup, points wallet, rewards catalogue, redemption.",
+          "Admin web console (React 19 + MUI): campaign setup, member management, reporting.",
+          "Backend services (Express 5 + TypeScript, DDD): auth, points ledger, rewards, notifications.",
+          "PostgreSQL data model via Kysely with reversible migrations."
+        ]},
+        {"type": "subhead", "text": "Out of scope (Phase 1)"},
+        {"type": "bullets", "items": [
+          "Third-party POS integration (targeted for Phase 2).",
+          "Multi-region data residency.",
+          "Native escape-hatch iOS/Android modules."
+        ]}
+      ]
+    },
+    {
+      "heading": "Deliverables",
+      "blocks": [
+        {"type": "table",
+         "headers": ["#", "Deliverable", "Acceptance criteria"],
+         "widths_in": [0.5, 2.9, 3.5],
+         "rows": [
+           ["D1", "Mobile app (iOS + Android)", "Passes UAT on the agreed device matrix; store-ready builds."],
+           ["D2", "Admin web console", "All campaign + reporting flows pass acceptance tests."],
+           ["D3", "Backend APIs", "Documented, authenticated, contract-tested against api-interfaces."],
+           ["D4", "Data model + migrations", "Reversible migrations; seed + backfill verified in staging."]
+         ]}
+      ]
+    },
+    {
+      "heading": "Timeline & Milestones",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Milestone", "Weeks", "Outcome"],
+         "widths_in": [2.5, 1.2, 3.2],
+         "rows": [
+           ["M1 — Foundations", "1–3", "Architecture, CI/CD, data model, auth skeleton."],
+           ["M2 — Core features", "4–9", "Points wallet, rewards, admin campaigns."],
+           ["M3 — Hardening", "10–12", "QA, performance, security review."],
+           ["M4 — Launch", "13–14", "UAT sign-off, store submission, go-live."]
+         ]}
+      ]
+    },
+    {
+      "heading": "Commercials",
+      "blocks": [
+        {"type": "callout", "title": "Fixed price", "body": [
+          "Phase 1 fixed fee: as per the accompanying commercial proposal.",
+          "Billing: 30% advance, 40% at M2, 30% at M4 acceptance."
+        ]}
+      ]
+    },
+    {
+      "heading": "Assumptions & Dependencies",
+      "blocks": [
+        {"type": "bullets", "items": [
+          "Client provides brand assets, content, and timely UAT feedback (≤ 3 business days per cycle).",
+          "Third-party services (SMS, email, push) are licensed by the client.",
+          "Scope changes are handled via a written change order."
+        ]}
+      ]
+    }
+  ]
+}

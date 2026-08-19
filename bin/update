@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# bstack-update — fetch the latest bstack and refresh the global install.
+#
+#   ./bin/update
+#
+# Pulls the latest commit, refreshes the Python deps, updates the installed "bstack"
+# plugin (so new /bstack:* commands, skills, agents, and hooks are picked up), and
+# verifies toolkit integrity. Local uncommitted changes are stashed, never discarded.
+set -uo pipefail
+
+SRC="${BASH_SOURCE[0]}"
+while [ -h "$SRC" ]; do d=$(cd -P "$(dirname "$SRC")" && pwd); SRC=$(readlink "$SRC"); [[ "$SRC" != /* ]] && SRC="$d/$SRC"; done
+BIN_DIR=$(cd -P "$(dirname "$SRC")" && pwd)
+ROOT=$(cd "$BIN_DIR/.." && pwd)
+
+say()  { printf '  %s\n' "$*"; }
+head() { printf '\n==> %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
+
+cd "$ROOT" || { warn "cannot cd to $ROOT"; exit 1; }
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { warn "$ROOT is not a git checkout — re-clone and run ./bin/setup"; exit 1; }
+
+OLD_VER=$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "origin/$BRANCH")
+head "Updating bstack ($BRANCH ← $UPSTREAM)"
+
+# --- 1. stash + fast-forward --------------------------------------------------
+STASHED=0
+if [ -n "$(git status --porcelain)" ]; then
+  git stash push -u -m "bstack-update autostash" >/dev/null 2>&1 && { STASHED=1; say "stashed local changes (restore: git -C $ROOT stash pop)"; } \
+    || { warn "could not stash local changes — aborting to avoid data loss"; exit 1; }
+fi
+git fetch --prune origin || { warn "git fetch failed"; exit 1; }
+if git merge-base --is-ancestor "$UPSTREAM" HEAD 2>/dev/null; then say "already up to date at $(git rev-parse --short HEAD)"
+else git reset --hard "$UPSTREAM" && say "advanced to $(git rev-parse --short HEAD)"; fi
+
+# --- 2. refresh Python deps (non-fatal) ---------------------------------------
+head "Refreshing Python deps"
+[ -f "$ROOT/requirements.txt" ] && { python3 -m pip install --user --disable-pip-version-check -q -r "$ROOT/requirements.txt" 2>/dev/null && say "deps ok" || warn "dep refresh skipped (offline/externally-managed) — non-blocking"; }
+
+# --- 3. update the installed plugin -------------------------------------------
+head "Updating the bstack plugin"
+if command -v claude >/dev/null 2>&1; then
+  claude plugin marketplace update bigstep 2>&1 | sed 's/^/  /' || warn "marketplace update reported an issue"
+  claude plugin install "bstack@bigstep" --scope user 2>&1 | sed 's/^/  /' || warn "plugin reinstall reported an issue"
+  say "plugin refreshed — run /reload-plugins in an active session (or restart)"
+else
+  warn "claude CLI not found — re-running the legacy registrar instead"
+  bash "$ROOT/bin/setup" >/dev/null 2>&1 || warn "fallback re-provision reported an issue"
+fi
+
+# --- 4. verify integrity ------------------------------------------------------
+head "Post-update verification"
+rc=0
+for g in bstack-command-lint bstack-doc-drift; do
+  [ -x "$ROOT/bin/$g" ] || continue
+  "$ROOT/bin/$g" >/dev/null 2>&1 && say "ok   $g" || { warn "$g FAILED — /bstack:improve"; rc=1; }
+done
+[ -x "$ROOT/bin/bstack-eval" ] && { "$ROOT/bin/bstack-eval" >/dev/null 2>&1 && say "ok   bstack-eval" || { warn "bstack-eval regressed (P-5.2)"; rc=1; }; }
+
+# --- 5. what's new ------------------------------------------------------------
+NEW_VER=$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)
+head "Done — bstack $OLD_VER → $NEW_VER"
+[ -f "$ROOT/CHANGELOG.md" ] && { say "Latest changelog entry:"; awk '/^## /{c++} c==1{print "    "$0} c==2{exit}' "$ROOT/CHANGELOG.md"; }
+[ "$STASHED" -eq 1 ] && say "Reminder: restore your local changes with: git -C $ROOT stash pop"
+exit "$rc"

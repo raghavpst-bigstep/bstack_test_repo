@@ -1,0 +1,68 @@
+{
+  "meta": {"title": "Design & Content Scope", "doc_ref": "BST-DSN-2026-030", "version": "1.0"},
+  "sheets": [
+    {
+      "name": "Design Scope",
+      "title": "Design Scope — Acme Hotels Website Revamp",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Design Activity", "Applies to", "Effort (days)"],
+         "widths": [34, 22, 14],
+         "rows": [
+           ["UX audit of current site", "All pages", 3],
+           ["Information architecture", "Global", 2],
+           ["Wireframes", "12 unique pages", 8],
+           ["Moodboard + style guide", "Brand", 4],
+           ["Hi-fi visual design", "12 unique pages", 12]
+         ],
+         "total": {"label": "Total", "sum_cols": [3]}},
+        {"type": "note", "title": "Out of scope",
+         "text": "Front-end development, CMS build, copywriting, and photography are not part of this design engagement."}
+      ]
+    },
+    {
+      "name": "Content Scope",
+      "title": "Content Scope",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Page type", "Count", "Basic / Unique", "Notes"],
+         "widths": [26, 10, 16, 34],
+         "rows": [
+           ["Home", "1", "Unique", "Hero, offers, destinations"],
+           ["Destination", "8", "Basic (templated)", "One template, 8 instances"],
+           ["Hotel detail", "1", "Unique", "Gallery + booking widget"],
+           ["Utility (about, contact)", "2", "Basic", "Standard layout"]
+         ]}
+      ]
+    },
+    {
+      "name": "Delivery Timeline",
+      "title": "Delivery Timeline (weeks)",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Phase", "Wk 1", "Wk 2", "Wk 3", "Wk 4", "Wk 5", "Wk 6"],
+         "widths": [22, 7, 7, 7, 7, 7, 7],
+         "rows": [
+           ["Discovery + IA", "●", "●", "", "", "", ""],
+           ["Wireframes", "", "●", "●", "", "", ""],
+           ["Visual design", "", "", "●", "●", "●", ""],
+           ["Review + handoff", "", "", "", "", "●", "●"]
+         ]}
+      ]
+    },
+    {
+      "name": "Project Assumptions",
+      "title": "Project Assumptions",
+      "blocks": [
+        {"type": "kv", "pairs": [
+          ["Client", "Acme Hotels Pvt. Ltd."],
+          ["Duration", "6 weeks"],
+          ["Rounds of revision", "2 per deliverable"],
+          ["Feedback SLA", "≤ 3 business days per cycle"]
+        ]},
+        {"type": "note", "title": "Standard assumptions",
+         "text": "Client provides brand assets and content. Scope is fixed; additional pages or a third revision round are handled via a change order. Timeline assumes timely feedback within the stated SLA."}
+      ]
+    }
+  ]
+}

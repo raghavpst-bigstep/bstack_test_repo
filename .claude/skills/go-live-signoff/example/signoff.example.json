@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "doc_ref": "BST-GL-0427",
+    "version": "1.0",
+    "classification": "Confidential",
+    "subtitle": "Confirms the release has met all readiness criteria and authorises deployment to production."
+  },
+  "details": {
+    "project_product": "Orion Tenant Portal",
+    "client_org": "Vertex Realty Group",
+    "release_version": "v3.4.0",
+    "release_type": "Minor",
+    "bigstep_release_mgr": "A. Nair",
+    "client_release_owner": "J. Whitfield",
+    "target_environment": "Production (AWS eu-west-1)",
+    "go_live_datetime": "18 Jul 2026, 22:00 BST",
+    "deployment_window": "22:00 – 23:30 BST",
+    "expected_downtime": "~15 min (rolling)"
+  },
+  "readiness": [
+    {"text": "UAT completed and signed off", "checked": true},
+    {"text": "Critical / High defects resolved or accepted", "checked": true},
+    {"text": "Code freeze; final build tagged & verified", "checked": true},
+    {"text": "Release notes prepared & shared", "checked": true},
+    {"text": "Deployment runbook documented & reviewed", "checked": true},
+    {"text": "Database migration scripts tested", "checked": true},
+    {"text": "Backups & rollback plan verified", "checked": true},
+    {"text": "Production environment provisioned & access verified", "checked": true},
+    {"text": "Security review completed (if applicable)", "checked": true},
+    {"text": "Performance within agreed thresholds", "checked": true},
+    {"text": "Monitoring, logging & alerting configured", "checked": true},
+    {"text": "Integrations / dependencies confirmed ready", "checked": false},
+    {"text": "Training & documentation delivered (if in scope)", "checked": true},
+    {"text": "Support, on-call & escalation contacts confirmed", "checked": true}
+  ],
+  "rollback": "Trigger: error rate > 2% or checkout failures for 5 min. Method: re-point ALB to previous task set (blue/green); restore DB from pre-migration snapshot 2026-07-18T21:45Z. Est. time: 20 min. Decision owner: Release Manager on call.",
+  "decision": {
+    "selected": "conditional",
+    "notes": "Go conditional on 'Integrations / dependencies' item — third-party KYC sandbox to be re-verified 1h pre-window."
+  },
+  "signoff": {
+    "client": {"name": "", "role": "Head of Product", "signature": "", "date": ""},
+    "bigstep": {"name": "", "role": "Delivery Lead", "signature": "", "date": ""}
+  }
+}

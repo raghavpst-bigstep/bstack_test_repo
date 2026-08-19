@@ -1,0 +1,91 @@
+{
+  "artifact": "bstack-protect evidence",
+  "schema": 1,
+  "backlog_id": "G-04",
+  "control": "PQG C2.2",
+  "repo": "raghavpst-bigstep/bstack_test_repo",
+  "branch": "main",
+  "commit": "ad6cbb3",
+  "verdict": "compliant",
+  "strictness": "solo (opt-out recorded)",
+  "classic_protection_http": "200",
+  "rulesets_matching_branch": 0,
+  "checks_passed": 7,
+  "checks_failed": 0,
+  "findings": [
+    {
+      "rule": "PR-4",
+      "requirement": "latest push approved by non-author",
+      "found": "waived (--solo)",
+      "required": "true"
+    }
+  ],
+  "raw_classic_protection": {
+    "url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection",
+    "required_status_checks": {
+      "url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection/required_status_checks",
+      "strict": true,
+      "contexts": [
+        "command-lint",
+        "eval",
+        "ddd-boundaries",
+        "migration-safety"
+      ],
+      "contexts_url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection/required_status_checks/contexts",
+      "checks": [
+        {
+          "context": "command-lint",
+          "app_id": 15368
+        },
+        {
+          "context": "eval",
+          "app_id": 15368
+        },
+        {
+          "context": "ddd-boundaries",
+          "app_id": 15368
+        },
+        {
+          "context": "migration-safety",
+          "app_id": 15368
+        }
+      ]
+    },
+    "required_pull_request_reviews": {
+      "url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection/required_pull_request_reviews",
+      "dismiss_stale_reviews": true,
+      "require_code_owner_reviews": false,
+      "require_last_push_approval": false,
+      "required_approving_review_count": 0
+    },
+    "required_signatures": {
+      "url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection/required_signatures",
+      "enabled": false
+    },
+    "enforce_admins": {
+      "url": "https://api.github.com/repos/raghavpst-bigstep/bstack_test_repo/branches/main/protection/enforce_admins",
+      "enabled": true
+    },
+    "required_linear_history": {
+      "enabled": true
+    },
+    "allow_force_pushes": {
+      "enabled": false
+    },
+    "allow_deletions": {
+      "enabled": false
+    },
+    "block_creations": {
+      "enabled": false
+    },
+    "required_conversation_resolution": {
+      "enabled": true
+    },
+    "lock_branch": {
+      "enabled": false
+    },
+    "allow_fork_syncing": {
+      "enabled": false
+    }
+  }
+}

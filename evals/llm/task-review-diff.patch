@@ -1,0 +1,41 @@
+# Review-recall golden fixture — seeded with exactly 6 defects (baseline; do not edit).
+# D1 IDOR: GET by id with no ownership check   D2 secret committed in code
+# D3 N+1 query in loop                          D4 migration without down()
+# D5 boundary violation: lib imports from app   D6 dead feature flag left behind
+--- /dev/null
++++ b/apps/backend-api/src/routes/saved-searches.ts
+@@ -0,0 +1,24 @@
++import { db } from 'libs/db';
++import { formatBadge } from 'apps/frontend-web/src/utils/badge'; // D5: app import from service route via lib path
++
++const ANALYTICS_KEY = 'sk_live_51Hb9x2Kj3fT8uQwErTyU'; // D2: committed secret
++const ENABLE_OLD_PANEL = false; // D6: dead flag, no caller flips it
++
++export async function getSavedSearch(req, res) {
++  const row = await db.selectFrom('saved_searches')
++    .where('id', '=', req.params.id) // D1: no user ownership check — any id readable
++    .selectAll().executeTakeFirst();
++  res.json(row);
++}
++
++export async function listWithCounts(req, res) {
++  const searches = await db.selectFrom('saved_searches')
++    .where('user_id', '=', req.user.id).selectAll().execute();
++  for (const s of searches) { // D3: N+1 — one count query per row
++    s.resultCount = await db.selectFrom('results')
++      .where('search_id', '=', s.id).select(db.fn.countAll().as('c')).executeTakeFirst();
++  }
++  res.json(searches);
++}
+--- /dev/null
++++ b/libs/db/src/lib/migrations/files/20260107000000_add_saved_searches.ts
+@@ -0,0 +1,9 @@
++import { Kysely } from 'kysely';
++
++export async function up(db: Kysely<any>): Promise<void> {
++  await db.schema.createTable('saved_searches')
++    .addColumn('id', 'serial', (c) => c.primaryKey())
++    .addColumn('user_id', 'integer', (c) => c.notNull())
++    .addColumn('name', 'text', (c) => c.notNull())
++    .execute();
++} // D4: no down(), not declared irreversible

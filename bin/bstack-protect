@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+# bstack-protect — provision and verify branch protection on a consuming project's repo.
+#
+# Implements G-04 (PQG C2.2 + correction #2): the setting must be PROVABLE per repo,
+# not asserted in prose. Binds the `vcs-host` adapter role declared in
+# docs/standards/README.md ("PRs/reviews/CI status, branch protection settings" →
+# E-9.3, R-1.5). GitHub is the only binding implemented today; the seam is marked
+# VCS-HOST SEAM below so GitLab/Bitbucket can be added without restructuring.
+#
+# This script NEVER runs against the bstack repo's own settings. It targets the
+# consuming project resolved from PROJECT.md or the git remote.
+#
+#   bstack-protect --verify                  read-only compliance check (default)
+#   bstack-protect --apply                   provision, capturing pre-state first
+#   bstack-protect --restore <pre-file>      replay a captured pre-state (rollback)
+#
+# Flags:
+#   --repo <owner/name>   override target (default: PROJECT.md vcs-host, then git remote)
+#   --branch <name>       override branch (default: the repo's default branch)
+#   --solo                RECORDED opt-out: 0 required approvals for a one-person repo
+#   --set-contexts a,b    bind required status checks (CHK-2 phase two). The empty
+#                         string CLEARS them — the only way out of a stale required
+#                         check that no longer reports and so blocks every merge.
+#   --dry-run             print the payload that would be sent; write nothing
+#
+# Exit codes are the contract — a check that could not run is NEVER a pass (G-09):
+#   0  compliant
+#   1  non-compliant (protection present but incomplete, or absent)
+#   2  usage error
+#   3  required tool missing
+#   4  not authenticated / insufficient permission
+#   5  INDETERMINATE — cannot tell; must never be read as "unprotected"
+#
+# bstack §3.1/§3.2: no token is ever read, printed, or persisted here. Auth is
+# delegated entirely to `gh`'s own credential store.
+
+set -uo pipefail
+
+E_OK=0; E_NONCOMPLIANT=1; E_USAGE=2; E_TOOL=3; E_AUTH=4; E_INDETERMINATE=5
+
+MODE="verify"
+BRANCH=""
+REPO=""
+RESTORE_FILE=""
+SOLO=0
+SET_CONTEXTS=""
+SET_CONTEXTS_GIVEN=0
+EVIDENCE_DIR="${BSTACK_EVIDENCE_DIR:-.bstack/evidence}"
+DRY_RUN=0
+
+say()  { printf '  %s\n' "$*"; }
+head_() { printf '\n==> %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
+die()  { printf '  ERROR: %s\n' "$*" >&2; exit "${2:-$E_USAGE}"; }
+
+usage() {
+  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  exit $E_USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --verify)  MODE="verify" ;;
+    --apply)   MODE="apply" ;;
+    --restore) MODE="restore"; RESTORE_FILE="${2:-}"; shift ;;
+    --branch)  BRANCH="${2:-}"; shift ;;
+    --repo)    REPO="${2:-}"; shift ;;
+    --solo)    SOLO=1 ;;
+    --set-contexts) SET_CONTEXTS="${2:-}"; SET_CONTEXTS_GIVEN=1; shift ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+# ---------------------------------------------------------------------------
+# 1. Preflight — fail CLOSED. G-09: a check that did not run is not a check
+#    that passed, so a missing tool is a hard failure, never a skip.
+# ---------------------------------------------------------------------------
+command -v gh >/dev/null 2>&1 || {
+  warn "gh (GitHub CLI) not on PATH — cannot verify branch protection."
+  warn "install: brew install gh   (or https://cli.github.com)"
+  exit $E_TOOL
+}
+command -v python3 >/dev/null 2>&1 || { warn "python3 not on PATH"; exit $E_TOOL; }
+
+gh auth status >/dev/null 2>&1 || {
+  warn "gh is installed but not authenticated."
+  warn "fix: gh auth login"
+  exit $E_AUTH
+}
+
+# ---------------------------------------------------------------------------
+# 2. Resolve the target. Precedence: --repo > PROJECT.md > git remote.
+#    Bootstrap rule 3 (docs/standards/README.md): where the manifest does not
+#    name the binding, detect it, USE it, and RECORD it — detection is never
+#    silently re-done per session.
+# ---------------------------------------------------------------------------
+MANIFEST="PROJECT.md"
+RESOLVED_FROM=""
+
+manifest_repo() {
+  [ -f "$MANIFEST" ] || return 1
+  python3 - "$MANIFEST" <<'PY'
+import re, sys
+try: txt = open(sys.argv[1], encoding="utf-8").read()
+except OSError: sys.exit(1)
+
+# STRICT markdown-table parse. There is deliberately no loose fallback: a permissive
+# `vcs-host.*?(\w+/\w+)` search happily matched the words "read/written" out of the
+# template's own Notes column and pointed the provisioner at repos/read/written.
+# A wrong target is worse than no target, so an unparseable row yields nothing and
+# the caller falls through to git-remote detection.
+TARGET = re.compile(r'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$')
+for line in txt.splitlines():
+    if not line.lstrip().startswith("|"):
+        continue
+    cells = [c.strip().strip("`").strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 3 or "vcs-host" not in cells[0].lower():
+        continue
+    binding, target = cells[1].lower(), cells[2]
+    if binding in ("", "todo") or target.lower() in ("", "todo"):
+        break                        # declared but unfilled -> treat as unset
+    if binding != "github":
+        break                        # VCS-HOST SEAM: only github is implemented
+    if TARGET.match(target):
+        print(target, end=""); sys.exit(0)
+    break
+print("", end="")
+PY
+}
+
+remote_repo() {
+  local url
+  url=$(git config --get remote.origin.url 2>/dev/null) || return 1
+  printf '%s' "$url" | python3 -c '
+import re,sys
+u = sys.stdin.read().strip()
+m = re.search(r"(?:github\.com[:/])([\w.-]+/[\w.-]+?)(?:\.git)?$", u)
+print(m.group(1) if m else "", end="")'
+}
+
+if [ -n "$REPO" ]; then
+  RESOLVED_FROM="--repo flag"
+else
+  REPO="$(manifest_repo 2>/dev/null || true)"
+  if [ -n "$REPO" ]; then
+    RESOLVED_FROM="$MANIFEST (vcs-host)"
+  else
+    REPO="$(remote_repo 2>/dev/null || true)"
+    [ -n "$REPO" ] && RESOLVED_FROM="git remote origin (detected)"
+  fi
+fi
+
+[ -n "$REPO" ] || die "cannot resolve target repo — pass --repo <owner/name>, or add a vcs-host row to $MANIFEST" $E_USAGE
+
+# ---------------------------------------------------------------------------
+# 3. API helpers. gh prints the error body on stdout and exits non-zero, so the
+#    HTTP status is recovered from the body rather than trusted from the exit code.
+# ---------------------------------------------------------------------------
+API_BODY=""; API_STATUS=""
+api_get() {
+  API_BODY=$(gh api "$1" 2>/dev/null); local rc=$?
+  if [ $rc -eq 0 ]; then API_STATUS=200; else
+    API_STATUS=$(printf '%s' "$API_BODY" | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin).get("status","000"))
+except Exception: print("000")' 2>/dev/null)
+    [ -z "$API_STATUS" ] && API_STATUS="000"
+  fi
+}
+
+jget() { printf '%s' "$2" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(""); sys.exit()
+for k in sys.argv[1].split("."):
+    if isinstance(d,dict) and k in d: d=d[k]
+    else: print(""); sys.exit()
+# json.dumps for non-strings so booleans emit true/false, not Python True/False.
+# Printing repr here silently inverts every boolean comparison downstream.
+print(d if isinstance(d,str) else json.dumps(d))' "$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------------------
+# 4. Admin probe. GitHub returns 404 (NOT 403) on the protection endpoint to a
+#    caller without admin, so admin must be established BEFORE any 404 is
+#    interpreted. Skipping this is how a verifier reports "unprotected" for a
+#    repo that is in fact protected.
+# ---------------------------------------------------------------------------
+api_get "repos/$REPO"
+[ "$API_STATUS" = "200" ] || {
+  warn "cannot read repos/$REPO (HTTP $API_STATUS) — wrong name, or no access."
+  exit $E_AUTH
+}
+REPO_JSON="$API_BODY"
+IS_ADMIN=$(jget "permissions.admin" "$REPO_JSON")
+DEFAULT_BRANCH=$(jget "default_branch" "$REPO_JSON")
+IS_PRIVATE=$(jget "private" "$REPO_JSON")
+OWNER_TYPE=$(jget "owner.type" "$REPO_JSON")
+[ -n "$BRANCH" ] || BRANCH="$DEFAULT_BRANCH"
+
+head_ "bstack-protect ($MODE) — $REPO @ $BRANCH"
+say "resolved from: $RESOLVED_FROM"
+say "owner type:    $OWNER_TYPE   private: $IS_PRIVATE   admin: ${IS_ADMIN:-false}"
+
+if [ "$IS_ADMIN" != "true" ]; then
+  warn ""
+  warn "INDETERMINATE — this account lacks admin on $REPO."
+  warn "Branch protection can be neither read nor set without it: GitHub answers the"
+  warn "protection endpoint with 404 rather than 403, so 'not protected' and 'not"
+  warn "permitted' are indistinguishable from here. Reporting neither."
+  warn "fix: have a repo/org owner grant admin, then re-run."
+  exit $E_INDETERMINATE
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Read current protection, disambiguating the 404.
+# ---------------------------------------------------------------------------
+api_get "repos/$REPO/branches/$BRANCH/protection"
+PROT_STATUS="$API_STATUS"; PROT_JSON="$API_BODY"
+
+RULESET_COUNT=0
+if [ "$PROT_STATUS" != "200" ]; then
+  # Classic protection absent. Before concluding "unprotected", check Rulesets —
+  # they enforce the same controls and are invisible to the classic endpoint.
+  api_get "repos/$REPO/rules/branches/$BRANCH"
+  if [ "$API_STATUS" = "200" ]; then
+    RULESET_COUNT=$(printf '%s' "$API_BODY" | python3 -c '
+import json,sys
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)')
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Evaluate. Rule IDs trace to .claude/rules/critical-patterns.md and the
+#    week-plan checklist so a reviewer can grep from finding to requirement.
+# ---------------------------------------------------------------------------
+FINDINGS=""; PASS_N=0; FAIL_N=0
+check() { # $1=id $2=requirement $3=actual $4=expected
+  if [ "$3" = "$4" ]; then
+    PASS_N=$((PASS_N+1)); printf '  PASS  %-8s %s\n' "$1" "$2"
+  else
+    FAIL_N=$((FAIL_N+1)); printf '  FAIL  %-8s %s (found: %s, need: %s)\n' "$1" "$2" "${3:-unset}" "$4"
+    FINDINGS="${FINDINGS}${1}|${2}|${3:-unset}|${4}"$'\n'
+  fi
+}
+
+VERDICT=""
+if [ "$PROT_STATUS" = "200" ]; then
+  RPR=$(jget "required_pull_request_reviews" "$PROT_JSON")
+  APPROVALS=$(jget "required_pull_request_reviews.required_approving_review_count" "$PROT_JSON")
+  DISMISS=$(jget "required_pull_request_reviews.dismiss_stale_reviews" "$PROT_JSON")
+  LASTPUSH=$(jget "required_pull_request_reviews.require_last_push_approval" "$PROT_JSON")
+  CODEOWNERS=$(jget "required_pull_request_reviews.require_code_owner_reviews" "$PROT_JSON")
+  ADMINS=$(jget "enforce_admins.enabled" "$PROT_JSON")
+  FORCE=$(jget "allow_force_pushes.enabled" "$PROT_JSON")
+  DELETES=$(jget "allow_deletions.enabled" "$PROT_JSON")
+  CHECKS=$(jget "required_status_checks" "$PROT_JSON")
+  CONTEXTS=$(jget "required_status_checks.contexts" "$PROT_JSON")
+
+  echo
+  say "compliance against the G-04 required set:"
+  [ -n "$RPR" ] && check "PR-1" "pull request required before merging" "present" "present" \
+                || check "PR-1" "pull request required before merging" "" "present"
+  MIN_APPROVALS=1; [ "$SOLO" = "1" ] && MIN_APPROVALS=0
+  if [ "${APPROVALS:-0}" -ge "$MIN_APPROVALS" ] 2>/dev/null; then
+    PASS_N=$((PASS_N+1)); printf '  PASS  %-8s %s\n' "PR-2" "approving reviews >= $MIN_APPROVALS (found $APPROVALS)"
+  else
+    FAIL_N=$((FAIL_N+1)); printf '  FAIL  %-8s %s (found: %s, need: >=%s)\n' "PR-2" "approving reviews" "${APPROVALS:-0}" "$MIN_APPROVALS"
+    FINDINGS="${FINDINGS}PR-2|approving reviews|${APPROVALS:-0}|>=${MIN_APPROVALS}"$'\n'
+  fi
+  check "PR-3" "stale approvals dismissed on new commits" "$DISMISS" "true"
+  # PR-4 is the control that actually closes C2.2's owner!=reviewer requirement.
+  # Under --solo it CANNOT hold (GitHub cannot require a non-author approval when zero
+  # approvals are required), so report it as an explicit WAIVER rather than either a
+  # silent pass or a permanent FAIL. A gate that can never go green gets switched off,
+  # and a gap that is silently passed is worse — so it is named, every run.
+  if [ "$SOLO" = "1" ]; then
+    printf '  WAIVE %-8s %s\n' "PR-4" "latest push approved by someone other than its author"
+    printf '        %-8s C2.2 owner!=reviewer is NOT met under --solo. Recorded in the\n' ""
+    printf '        %-8s evidence artefact as strictness=solo. Remove --solo once a\n' ""
+    printf '        %-8s second reviewer exists.\n' ""
+    FINDINGS="${FINDINGS}PR-4|latest push approved by non-author|waived (--solo)|true"$'\n'
+  else
+    check "PR-4" "latest push approved by someone other than its author" "$LASTPUSH" "true"
+  fi
+  # ADM-1: without this an admin author self-merges and every rule above is cosmetic.
+  check "ADM-1" "rules enforced for admins too" "$ADMINS" "true"
+  check "PUSH-1" "force pushes blocked" "$FORCE" "false"
+  # DEL-1: blocking force-push while allowing deletion leaves delete-and-recreate open.
+  check "DEL-1" "branch deletion blocked" "$DELETES" "false"
+  [ -n "$CHECKS" ] && check "CHK-1" "status checks gate declared" "present" "present" \
+                   || check "CHK-1" "status checks gate declared" "" "present"
+
+  if [ "$CONTEXTS" = "[]" ] || [ -z "$CONTEXTS" ]; then
+    say ""
+    say "NOTE  CHK-2  required status checks declared but the context list is EMPTY."
+    say "            This gates nothing yet. GitHub only learns a check's name after that"
+    say "            check has reported once, so contexts are bound in a second --apply"
+    say "            after the CI workflow's first run (two-phase, by necessity)."
+  fi
+  if [ "$CODEOWNERS" != "true" ]; then
+    say ""
+    say "NOTE  OWN-1  require_code_owner_reviews is off. Enabling it needs a CODEOWNERS"
+    say "            file, which needs a populated ownership table (K-02). Until then"
+    say "            PR-4 gives 'some other human approved', not 'the owner approved',"
+    say "            so P-07 stays partially open. Advisory, not enabled by --apply."
+  fi
+
+  [ "$FAIL_N" -eq 0 ] && VERDICT="compliant" || VERDICT="non-compliant"
+
+elif [ "$RULESET_COUNT" -gt 0 ]; then
+  echo
+  warn "INDETERMINATE — no classic protection, but $RULESET_COUNT ruleset(s) apply to $BRANCH."
+  warn "Rulesets enforce the same controls through a different API. This verifier reads"
+  warn "classic protection, so it cannot assert compliance here — and must not report"
+  warn "'unprotected', which would be false."
+  warn "inspect: gh api repos/$REPO/rules/branches/$BRANCH"
+  VERDICT="ruleset-managed"
+else
+  echo
+  say "FAIL  ALL      branch '$BRANCH' has NO protection (classic absent, 0 rulesets)"
+  VERDICT="unprotected"
+  FAIL_N=8
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Evidence. Written ONLY for a determinate read — never persist an error body
+#    as evidence, and never persist actor lists (bstack §12.10/§13.10: no PII in
+#    committed artefacts; `restrictions` carries logins and team slugs).
+# ---------------------------------------------------------------------------
+write_evidence() { # $1=label ("" = post/current state, "pre" = rollback snapshot)
+  mkdir -p "$EVIDENCE_DIR"
+  local sha; sha=$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")
+  local out
+  if [ "$1" = "pre" ]; then
+    # A pre-state is a ROLLBACK ARTEFACT, so it must never be overwritten. Keying it
+    # on the commit alone means a second --apply on the same commit clobbers the
+    # original snapshot and the true rollback target is lost. Stamp it per invocation.
+    out="$EVIDENCE_DIR/branch-protection-${BRANCH}-pre-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
+    [ -e "$out" ] && out="${out%.json}-$$.json"
+  else
+    # Current-state evidence is a snapshot of now; overwriting per commit is correct.
+    out="$EVIDENCE_DIR/branch-protection-${BRANCH}-${sha}.json"
+  fi
+  REPO="$REPO" BRANCH="$BRANCH" VERDICT="$VERDICT" PROT_STATUS="$PROT_STATUS" \
+  RULESET_COUNT="$RULESET_COUNT" PASS_N="$PASS_N" FAIL_N="$FAIL_N" SOLO="$SOLO" \
+  FINDINGS="$FINDINGS" SHA="$sha" PROT_JSON="$PROT_JSON" \
+  python3 - "$out" <<'PY'
+import json, os, sys
+raw = os.environ.get("PROT_JSON","")
+try: prot = json.loads(raw) if os.environ["PROT_STATUS"] == "200" else None
+except Exception: prot = None
+
+# Redact actor lists before this file is committed.
+if isinstance(prot, dict):
+    if prot.get("restrictions"):
+        r = prot["restrictions"]
+        prot["restrictions"] = {
+            "_redacted": "actor lists withheld from evidence (bstack §12.10)",
+            "users_count": len(r.get("users") or []),
+            "teams_count": len(r.get("teams") or []),
+            "apps_count":  len(r.get("apps")  or []),
+        }
+    rpr = prot.get("required_pull_request_reviews")
+    if isinstance(rpr, dict) and rpr.get("dismissal_restrictions"):
+        rpr["dismissal_restrictions"] = {"_redacted": True}
+
+findings = []
+for line in os.environ.get("FINDINGS","").strip().splitlines():
+    if not line.strip(): continue
+    p = line.split("|")
+    if len(p) == 4:
+        findings.append({"rule": p[0], "requirement": p[1], "found": p[2], "required": p[3]})
+
+doc = {
+    "artifact": "bstack-protect evidence",
+    "schema": 1,
+    "backlog_id": "G-04",
+    "control": "PQG C2.2",
+    "repo": os.environ["REPO"],
+    "branch": os.environ["BRANCH"],
+    "commit": os.environ["SHA"],
+    "verdict": os.environ["VERDICT"],
+    "strictness": "solo (opt-out recorded)" if os.environ["SOLO"] == "1" else "strict",
+    "classic_protection_http": os.environ["PROT_STATUS"],
+    "rulesets_matching_branch": int(os.environ["RULESET_COUNT"]),
+    "checks_passed": int(os.environ["PASS_N"]),
+    "checks_failed": int(os.environ["FAIL_N"]),
+    "findings": findings,
+    "raw_classic_protection": prot,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2, sort_keys=False)
+    f.write("\n")
+print(sys.argv[1])
+PY
+}
+
+# ---------------------------------------------------------------------------
+# 8. Modes
+# ---------------------------------------------------------------------------
+record_binding() {
+  # Bootstrap rule 3: persist the detection so it is never silently re-derived.
+  case "$RESOLVED_FROM" in *detected*) ;; *) return 0 ;; esac
+  [ -f "$MANIFEST" ] || return 0
+  grep -q 'vcs-host' "$MANIFEST" 2>/dev/null && return 0
+  printf '\n| `vcs-host` | github | `%s` | detected by bstack-protect |\n' "$REPO" >> "$MANIFEST"
+  say "recorded vcs-host binding into $MANIFEST (Bootstrap rule 3)"
+}
+
+case "$MODE" in
+  verify)
+    echo
+    if [ "$VERDICT" = "ruleset-managed" ]; then exit $E_INDETERMINATE; fi
+    ev=$(write_evidence "")
+    say "verdict: $VERDICT   ($PASS_N passed, $FAIL_N failed)"
+    say "evidence: $ev"
+    record_binding
+    [ "$FAIL_N" -eq 0 ] && exit $E_OK || exit $E_NONCOMPLIANT
+    ;;
+
+  apply)
+    if [ "$VERDICT" = "ruleset-managed" ]; then
+      warn "refusing to --apply: $BRANCH is ruleset-managed. Writing classic protection"
+      warn "on top would create two overlapping sources of truth. Resolve manually."
+      exit $E_INDETERMINATE
+    fi
+    echo
+    # Pre-state FIRST. Ordering is the rollback guarantee: classic PUT is a
+    # full-object replace, so anything not in our payload is deleted, not kept.
+    PRE=$(write_evidence "pre")
+    say "pre-state captured: $PRE"
+    say "  (this file records 'unprotected' explicitly when there was no protection —"
+    say "   an absent pre-file must never be read as 'there was nothing there')"
+
+    PAYLOAD=$(REPO="$REPO" SOLO="$SOLO" OWNER_TYPE="$OWNER_TYPE" PROT_STATUS="$PROT_STATUS" \
+              PROT_JSON="$PROT_JSON" SET_CONTEXTS="$SET_CONTEXTS" \
+              SET_CONTEXTS_GIVEN="$SET_CONTEXTS_GIVEN" python3 - <<'PY'
+import json, os
+prev = {}
+if os.environ["PROT_STATUS"] == "200":
+    try: prev = json.loads(os.environ["PROT_JSON"])
+    except Exception: prev = {}
+
+def en(k, default):
+    v = prev.get(k)
+    if isinstance(v, dict) and "enabled" in v: return v["enabled"]
+    return default if v is None else v
+
+prev_rpr = prev.get("required_pull_request_reviews") or {}
+prev_rsc = prev.get("required_status_checks") or {}
+
+# READ-MERGE-WRITE. Existing values are preserved wherever they are at least as
+# strict as ours; we only ever tighten. Every top-level key must be present because
+# the classic PUT deletes omitted fields.
+payload = {
+    "required_status_checks": {
+        "strict":   bool(prev_rsc.get("strict", True)),
+        # Contexts are preserved verbatim by default and never invented: GitHub only
+        # knows a check name after it has reported, so binding them is a later, second
+        # apply (CHK-2 phase two) done with --set-contexts.
+        #
+        # --set-contexts is also the ONLY way to clear a stale required check. A context
+        # that no longer reports blocks every merge on the branch forever, and a
+        # preserve-only merge cannot dig you out of that hole.
+        "contexts": (
+            [c.strip() for c in os.environ["SET_CONTEXTS"].split(",") if c.strip()]
+            if os.environ["SET_CONTEXTS_GIVEN"] == "1"
+            else list(prev_rsc.get("contexts") or [])
+        ),
+    },
+    "enforce_admins": True,
+    "required_pull_request_reviews": {
+        "required_approving_review_count":
+            0 if os.environ["SOLO"] == "1"
+              else max(1, int(prev_rpr.get("required_approving_review_count") or 0)),
+        "dismiss_stale_reviews": True,
+        # Unsatisfiable when zero approvals are required, so --solo must drop it too.
+        # This is the honest cost of the opt-out: with --solo, C2.2's owner!=reviewer
+        # requirement is NOT met. The evidence artefact records strictness=solo so the
+        # gap is visible in the audit trail rather than implied by its absence.
+        "require_last_push_approval": (os.environ["SOLO"] != "1"),
+        # Left as-found: enabling it without a CODEOWNERS file blocks every merge.
+        "require_code_owner_reviews": bool(prev_rpr.get("require_code_owner_reviews", False)),
+    },
+    # Teams cannot be referenced on a user-owned repo, so restrictions must be null
+    # there; on an org repo any existing restriction object is preserved untouched.
+    "restrictions": (prev.get("restrictions") if os.environ["OWNER_TYPE"] == "Organization" else None),
+    "required_linear_history": bool(en("required_linear_history", False)),
+    "allow_force_pushes": False,
+    "allow_deletions": False,
+    "block_creations": bool(en("block_creations", False)),
+    "required_conversation_resolution": bool(en("required_conversation_resolution", True)),
+    "lock_branch": bool(en("lock_branch", False)),
+    "allow_fork_syncing": bool(en("allow_fork_syncing", False)),
+}
+if isinstance(payload["restrictions"], dict):
+    r = payload["restrictions"]
+    payload["restrictions"] = {
+        "users": [u["login"] for u in (r.get("users") or [])],
+        "teams": [t["slug"]  for t in (r.get("teams") or [])],
+        "apps":  [a["slug"]  for a in (r.get("apps")  or [])],
+    }
+print(json.dumps(payload))
+PY
+)
+    if [ "$DRY_RUN" = "1" ]; then
+      say "--dry-run: payload that WOULD be sent:"
+      printf '%s' "$PAYLOAD" | python3 -m json.tool | sed 's/^/    /'
+      exit $E_OK
+    fi
+
+    say "applying protection to $REPO @ $BRANCH ..."
+    if ! printf '%s' "$PAYLOAD" | gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" \
+         -H "Accept: application/vnd.github+json" --input - >/dev/null 2>/tmp/bsp.err; then
+      warn "PUT failed:"; sed 's/^/    /' /tmp/bsp.err >&2
+      warn "rollback: bstack-protect --restore $PRE"
+      exit $E_AUTH
+    fi
+    say "applied. re-verifying ..."
+    record_binding
+    exec "$0" --verify --repo "$REPO" --branch "$BRANCH" $([ "$SOLO" = "1" ] && echo --solo)
+    ;;
+
+  restore)
+    [ -n "$RESTORE_FILE" ] && [ -f "$RESTORE_FILE" ] || die "--restore needs an existing pre-state file" $E_USAGE
+    echo
+    RAW=$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps(d.get("raw_classic_protection")))' "$RESTORE_FILE")
+    if [ "$RAW" = "null" ]; then
+      say "pre-state records NO protection — removing protection to restore it."
+      gh api -X DELETE "repos/$REPO/branches/$BRANCH/protection" >/dev/null 2>&1 \
+        && say "protection removed (restored to pre-state)" \
+        || { warn "DELETE failed"; exit $E_AUTH; }
+      exit $E_OK
+    fi
+    warn "restoring a captured protection object is not automated in v1."
+    warn "The pre-state is in $RESTORE_FILE under .raw_classic_protection; re-apply it with:"
+    warn "  gh api -X PUT repos/$REPO/branches/$BRANCH/protection --input <payload>"
+    exit $E_USAGE
+    ;;
+esac

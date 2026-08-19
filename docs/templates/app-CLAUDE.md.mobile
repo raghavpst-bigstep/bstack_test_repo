@@ -1,0 +1,134 @@
+<!--
+Per-app CLAUDE.md template for apps/mobile-* and apps/native-* directories.
+Copy to apps/<your-app>/CLAUDE.md and fill in. The mobile reviewer agents
+(mobile-manifest-auditor, mobile-release-gate, mobile-compose-reviewer) and
+bin/bstack-mobile-parity read this file for per-app context.
+
+Repo-level rules in .claude/rules/critical-patterns.md still apply on top of
+whatever this file says — this file fills in app-specific values, it does not
+override rules.
+-->
+
+# `apps/<app-name>` — App Context
+
+## App identity
+
+| Field | Value |
+|---|---|
+| App name (human) | <e.g. Driver> |
+| Bundle ID (iOS) | <com.bigstep.driver> |
+| Application ID (Android) | <com.bigstep.driver> |
+| App Store ID | <numeric ASC ID> |
+| Play package | <com.bigstep.driver> |
+| Apple Team ID | <ABCDEF1234> |
+| Google Play account | <bigstep-play-org> |
+
+## Stack deviations from ADR-001
+
+If this app deviates from the ADR-001 locked stack table, list deviations here with rationale. An empty list means "no deviations." Reviewers cross-check this against the auditor's locked-stack drift findings.
+
+| Dep | ADR-001 default | This app uses | Rationale |
+|---|---|---|---|
+| _none_ | — | — | — |
+
+## Platform targets
+
+| Field | Value |
+|---|---|
+| Min iOS | <e.g. 16.0> |
+| Min Android API | <e.g. 24 (Android 7.0)> |
+| Target API (Android) | <e.g. 35 (Android 15)> |
+| Compile SDK (Android) | <e.g. 35> |
+| Expo SDK (if RN) | <e.g. 52> |
+
+## Crash reporting (§ 5.6)
+
+| Field | Value |
+|---|---|
+| iOS SDK | Sentry React Native / Sentry Apple / Crashlytics — pick one |
+| Android SDK | Sentry React Native / Sentry Android / Crashlytics — pick one |
+| Sentry project | <slug> |
+| Sentry release naming | `<app-name>@<versionName>+<buildNumber>` |
+| Source-maps uploaded? (§ 12.8) | Yes (CI step) / No (REVIEW) |
+
+## Observability beyond crashes
+
+| Field | Value |
+|---|---|
+| RUM provider | (none) / Sentry Performance / Datadog RUM Mobile |
+| Cold-start TTI budget | <e.g. 1500 ms on Pixel 4a> |
+| ANR rate gate | <e.g. ≤ 0.47% per Play Vitals> |
+
+## Feature-flag + kill-switch (§ 12.22)
+
+| Field | Value |
+|---|---|
+| Feature-flag SDK | Statsig / LaunchDarkly / Unleash / GrowthBook / in-house |
+| Kill-switch min-version endpoint | <e.g. /api/v1/min-version> |
+| Force-update screen file | <path in repo> |
+| Maestro flow that tests it | <path> |
+
+## Consent & compliance (§ 13)
+
+| Field | Value |
+|---|---|
+| Audience (COPPA — § 13.7) | adults / mixed / under-13 |
+| Consent SDK (§ 13.5) | Didomi / OneTrust / Sourcepoint / in-house |
+| Privacy nutrition label file (§ 13.2) | `apps/<app>/privacy-label.yaml` |
+| Play Data Safety file (§ 13.3) | `apps/<app>/data-safety.yaml` |
+| ATT purpose strings (§ 13.1) | _list NSUserTrackingUsageDescription text_ |
+| Required-reason API codes (§ 13.4) | _list per Apple-approved list_ |
+| EU trader info (§ 13.6) | `apps/<app>/store-trader-info.yaml` |
+| Regional store rules (§ 13.8) | _list any per-region requirements: KSA / UAE / India / China_ |
+
+## Locked-stack overrides for this app
+
+If you use a dep that is not in ADR-001, list it here with rationale; the auditor consults this section before flagging.
+
+```
+# Example
+- react-native-svg@^15.0.0: SVG rendering (RN locked stack has no SVG primitive yet).
+  Added 2026-06-25 by @atul. Tracked for ADR-001 upstream addition: <ticket>.
+```
+
+## Parity manifest
+
+Used by `bin/bstack-mobile-parity` to detect iOS↔Android drift. List every user-facing feature that should be at parity; the parity tool can compare perm + capability declarations.
+
+```
+# Example
+- camera_scan: iOS+Android, requires camera perm
+- biometric_unlock: iOS+Android, no perm (uses LocalAuthentication / BiometricPrompt)
+- push_notifications: iOS+Android, requires POST_NOTIFICATIONS (Android 13+) / UNUserNotificationCenter
+```
+
+If a feature is intentionally one-platform-only, declare it here so the parity tool doesn't flag it:
+
+```
+- live_activities: iOS-only (Android has no equivalent — accepted)
+- widgets_homescreen: iOS+Android (different implementations)
+```
+
+## On-call
+
+| Role | Owner |
+|---|---|
+| Primary on-call | <github-handle> (rotated weekly, see #on-call) |
+| Mobile reviewer | `@bstack-mobile-reviewers` GitHub team |
+| Native escape-hatch owner (if `apps/native-*`) | <github-handle> |
+
+## Release runbooks
+
+- Store release: `/bstack:mobile-release` then follow the prompt.
+- OTA hotfix: `/bstack:hotfix` then follow the OTA branch.
+- Signing-key compromise: `docs/runbooks/MOBILE-SIGNING-COMPROMISE.md`.
+
+## Reviewer escape hatches (per-app overrides)
+
+Some rules support per-app override with explicit rationale. Document overrides here:
+
+```
+# Example
+- parity-ignore: live_activities — iOS-only by product decision (no Android equivalent shipped).
+- targetSdk-grace: 2026-08 window for API 36 bump tracked in <ticket>.
+```

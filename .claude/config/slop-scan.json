@@ -1,0 +1,18 @@
+{
+  "$comment": "AI-slop thresholds consumed by /bstack:design-review (visual) and /bstack:review-doc (prose). A surface/doc exceeding a threshold is a FIX finding, not a vibe.",
+  "prose": {
+    "banned_words": ["comprehensive", "robust", "nuanced", "holistic", "delve", "seamless", "cutting-edge", "leverage"],
+    "max_banned_word_hits": 0,
+    "max_filler_transition_ratio": 0.05,
+    "notes": "Single source for the avoid-word list previously duplicated in brainstorm.md and plan.md — those cite this file."
+  },
+  "visual": {
+    "max_generic_gradient_heroes": 0,
+    "max_emoji_as_icons": 0,
+    "spacing_base_px": [4, 8],
+    "max_offgrid_spacing_values": 2,
+    "max_font_families": 2,
+    "require_theme_tokens": true,
+    "notes": "Checked by design-review step 'AI-slop patterns' against rendered pages."
+  }
+}

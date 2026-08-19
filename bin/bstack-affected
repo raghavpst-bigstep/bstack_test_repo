@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# bstack-affected — deterministic "what changed" digest for plan/review.
+#
+# Why: /bstack:plan and /bstack:review both need the affected apps/libs + whether
+# any DDD boundary was crossed. Letting the agent read project.json files and
+# reason about the graph is slow and token-heavy. This emits a compact table.
+#
+# Usage: bstack-affected [base-branch]   (default base = main)
+# Prefers Nx's own affected graph; falls back to git path mapping if nx is absent.
+set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$REPO_ROOT"
+BASE="${1:-main}"
+git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1 || BASE="HEAD~1"
+
+echo "  base: $BASE"
+
+# Changed files, mapped to apps/<x> and libs/<y>.
+# Portable collection (no bash-4 mapfile — macOS ships bash 3.2; see bstack-ddd-check).
+CHANGED=()
+while IFS= read -r _f; do [ -n "$_f" ] && CHANGED+=("$_f"); done \
+  < <(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)
+[ "${#CHANGED[@]}" -eq 0 ] && { echo "  (no changes vs $BASE)"; exit 0; }
+
+projects=$(printf '%s\n' "${CHANGED[@]}" \
+  | grep -E '^(apps|libs)/' \
+  | awk -F/ '{ print $1"/"$2 }' | sort -u || true)
+
+if command -v npx >/dev/null 2>&1 && [ -f nx.json ]; then
+  echo "  affected (nx):"
+  npx nx show projects --affected --base="$BASE" 2>/dev/null | sed 's/^/    /' || echo "    (nx graph unavailable)"
+else
+  echo "  affected (path map):"
+  echo "${projects:-    (none under apps/ or libs/)}" | sed 's/^/    /'
+fi
+
+# DDD crossing summary on the diff (reuses the boundary checker if present).
+if [ -x "$REPO_ROOT/bin/bstack-ddd-check" ]; then
+  echo "  DDD:"
+  "$REPO_ROOT/bin/bstack-ddd-check" --diff | sed 's/^/  /' || true
+fi
+
+# Flag migrations + api-interfaces changes — the two highest-risk surfaces.
+if printf '%s\n' "${CHANGED[@]}" | grep -qE 'migrations'; then
+  echo "  ⚠ migration files changed — run bin/bstack-migrate-check on each before review."
+fi
+if printf '%s\n' "${CHANGED[@]}" | grep -qE 'libs/api-interfaces'; then
+  echo "  ⚠ api-interfaces changed — cross-domain contract; check every consumer."
+fi

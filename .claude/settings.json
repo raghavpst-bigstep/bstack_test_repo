@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/SessionStart.sh",
+            "outHandle": "print"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/route.sh",
+            "statusMessage": "Routing intent to a bstack command..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-careful.sh",
+            "statusMessage": "Checking for destructive commands..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-freeze.sh",
+            "statusMessage": "Checking freeze boundary..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-freeze.sh",
+            "statusMessage": "Checking freeze boundary..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "bash bin/bstack-context-stamp; echo '[bstack] Checkpoint stamped (.claude/context/last-checkpoint.md). If this commit fixed a non-trivial bug or shipped a feature, run /bstack:compound to capture it — and /bstack:learn log for a structured entry.'",
+            "outHandle": "print"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bin/bstack-solutions:*)",
+      "Bash(bin/bstack-ddd-check:*)",
+      "Bash(bin/bstack-migrate-check:*)",
+      "Bash(bin/bstack-affected:*)",
+      "Bash(bin/bstack-learn:*)",
+      "Bash(bin/bstack-eval:*)",
+      "Bash(bin/bstack-command-lint:*)",
+      "Bash(bin/bstack-context-stamp)",
+      "Bash(bin/bstack-mobile-digest:*)",
+      "Bash(bin/bstack-mobile-parity:*)",
+      "Bash(nx affected:*)",
+      "Bash(nx test:*)",
+      "Bash(nx lint:*)",
+      "Bash(nx e2e:*)",
+      "Bash(nx serve:*)",
+      "Bash(npm run local)",
+      "Bash(npm run db:seed:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git fetch:*)",
+      "Bash(git branch:*)",
+      "Bash(git show:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr status:*)",
+      "Bash(curl -s -o /dev/null -w *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push *--force-with-lease*)",
+      "Bash(git reset --hard*)",
+      "Bash(git commit *--no-verify*)",
+      "Bash(rm -rf*)"
+    ]
+  }
+}

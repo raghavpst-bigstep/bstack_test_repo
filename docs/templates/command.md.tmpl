@@ -1,0 +1,36 @@
+---
+name: bstack:<command-name>
+description: '<one line — what it does and when to use it>'
+argument-hint: '[<args>]'
+model: <haiku|sonnet|opus — per the model-tier table in .claude/config/command-conventions.md>
+---
+
+# /bstack:<command-name>
+
+> **TASK TRACKING:** Create one task per <numbered step | finding | variant | invoked mode>. Mark each complete as you go.
+>
+> **Use when:** <trigger conditions. If another command is closer, name it.>
+
+## MCP usage
+
+| MCP | When | What for |
+|---|---|---|
+| <server> | <Always / condition> | <specific tool calls and purpose> |
+
+## Steps
+
+1. **<Step name>** — <what happens. Deterministic pre-pass first (bin/ digest tools); cite rules by number (`bstack §x.y` or generic `E-/T-/R-/A-/P-`); never restate them.>
+2. ...
+N. **Handoff** — <the next command in the pipeline and the artifact it consumes.>
+
+## Hard rules
+
+- <the non-negotiables for this command — each should trace to a rule number>
+
+<!--
+Template contract (checked by bin/bstack-command-lint):
+- frontmatter has name (bstack:<file-stem>), description, model (haiku|sonnet|opus)
+- a "> **TASK TRACKING:**" block appears before the first ## section
+- every referenced bin/ script and .claude/ config file exists
+- output artifacts land in a location declared in .claude/config/command-conventions.md
+-->

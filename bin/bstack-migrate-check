@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# bstack-migrate-check — deterministic static checks on a Kysely migration.
+#
+# Why: kysely-migration-validator + /bstack:migrate otherwise read the file and
+# re-derive the §4 checklist every time. This runs the mechanical checks once and
+# emits a PASS/WARN/FAIL list, so the agent only reasons about what's not green.
+#
+# Usage: bstack-migrate-check <path-to-migration.ts>
+# Exit:  0 = no FAILs, 1 = at least one FAIL (callers can gate).
+set -euo pipefail
+
+FILE="${1:-}"
+[ -z "$FILE" ] && { echo "usage: bstack-migrate-check <migration.ts>" >&2; exit 2; }
+[ -f "$FILE" ] || { echo "no such file: $FILE" >&2; exit 2; }
+
+base=$(basename "$FILE")
+body=$(cat "$FILE")
+fails=0
+row() { printf "  %-5s %-26s %s\n" "$1" "$2" "$3"; [ "$1" = "FAIL" ] && fails=$((fails+1)); return 0; }
+has() { echo "$body" | grep -qiE "$1"; }
+
+# 4.5 — naming: YYYYMMDDHHMMSS_<verb>_<noun>.ts
+if echo "$base" | grep -qE '^[0-9]{14}_[a-z0-9]+_[a-z0-9_]+\.ts$'; then
+  row "PASS" "naming (4.5)" "$base"
+else
+  row "WARN" "naming (4.5)" "expected YYYYMMDDHHMMSS_<verb>_<noun>.ts — got $base"
+fi
+
+# 4.1 — reversibility: a down export that isn't a bare throw / empty
+if has 'export[[:space:]]+async[[:space:]]+function[[:space:]]+down|export[[:space:]]+const[[:space:]]+down|async[[:space:]]+down|^[[:space:]]*down[[:space:]]*[:=]'; then
+  if has 'irreversible|cannot be reversed|no[- ]?op.*down|down.*throw'; then
+    row "WARN" "reversibility (4.1)" "down present but looks irreversible — needs explicit sign-off note"
+  else
+    row "PASS" "reversibility (4.1)" "down() present"
+  fi
+else
+  row "FAIL" "reversibility (4.1)" "no down() — declare irreversible explicitly or add one"
+fi
+
+# 4.2 — NOT NULL add on existing table without default + backfill
+if has 'notNull\(\)'; then
+  if has 'defaultTo|default\(' ; then
+    row "PASS" "not-null safety (4.2)" "notNull paired with a default"
+  else
+    row "FAIL" "not-null safety (4.2)" "notNull() without defaultTo — locks large tables; add default + backfill"
+  fi
+else
+  row "PASS" "not-null safety (4.2)" "no bare NOT NULL add"
+fi
+
+# 4.3 — index on prod-sized table needs CONCURRENTLY
+if has 'createIndex|create[[:space:]]+index'; then
+  if has 'concurrently'; then
+    row "PASS" "index locking (4.3)" "CONCURRENTLY present"
+  else
+    row "FAIL" "index locking (4.3)" "createIndex without CONCURRENTLY — lock risk on prod"
+  fi
+else
+  row "PASS" "index locking (4.3)" "no index creation"
+fi
+
+# 4.4 — idempotency: ifNotExists / IF NOT EXISTS on adds
+if has 'createTable|addColumn|createIndex'; then
+  if has 'ifNotExists|if not exists'; then
+    row "PASS" "idempotency (4.4)" "ifNotExists guards present"
+  else
+    row "WARN" "idempotency (4.4)" "adds without ifNotExists — re-run after interruption may fail"
+  fi
+else
+  row "PASS" "idempotency (4.4)" "n/a"
+fi
+
+echo ""
+if [ "$fails" -eq 0 ]; then
+  echo "  No FAILs. Agent should still confirm down() truly reverses up()."
+  exit 0
+fi
+echo "  $fails FAIL(s) — block until resolved (critical-patterns §4)."
+exit 1

@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# bstack-rice — R.I.C.E. feature-protocol helper.
+#
+# Why: the per-project SKILL.md is the law for new-feature work, but the agent
+# needs deterministic answers to "where does it live?" and "is it healthy?"
+# instead of greping each turn. This script answers those questions and
+# scaffolds the file on first use.
+#
+# Commands:
+#   bstack-rice path [<file>]      resolve nearest SKILL.md (+ inheritance chain) from <file> or pwd
+#   bstack-rice validate [<path>]  advisory lint — hard-fail on missing sections/placeholders, warn on staleness
+#   bstack-rice diff <existing>    diff <existing> SKILL.md against the generic template (semantic-ish)
+#   bstack-rice init               scaffold base + per-app SKILL.md (interactive — driven by /bstack:rice-init)
+#
+# Exit codes: 0 ok (warnings ok), 1 hard fail, 2 usage error.
+set -uo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+TEMPLATE="$REPO_ROOT/.claude/skills/feature-protocol/SKILL.template.md"
+
+_usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-2}"
+}
+
+_die() { printf 'bstack-rice: %s\n' "$*" >&2; exit 1; }
+
+# ---------- path ----------
+# Walk up from <file>'s directory looking for a SKILL.md under
+#   .claude/skills/*-feature-protocol/SKILL.md  or
+#   .claude/skills/feature-protocol/SKILL.md
+# Then chain `extends:` (frontmatter, relative to the SKILL.md's dir) to the parent.
+_cmd_path() {
+  local start="${1:-$PWD}"
+  [ -e "$start" ] || start="$PWD"
+  local dir
+  dir=$(cd "$(dirname "$start")" 2>/dev/null && pwd) || dir="$PWD"
+
+  local found=""
+  while :; do
+    for cand in "$dir"/.claude/skills/*-feature-protocol/SKILL.md "$dir"/.claude/skills/feature-protocol/SKILL.md; do
+      [ -f "$cand" ] || continue
+      # ignore the template; only consume real SKILL.md (no [BRACKETED] in name slug isn't enough — also reject the bstack:template marker)
+      if head -1 "$cand" | grep -q 'bstack:template'; then continue; fi
+      found="$cand"; break 2
+    done
+    [ "$dir" = "/" ] || [ "$dir" = "$REPO_ROOT" ] && break
+    dir=$(dirname "$dir")
+  done
+
+  if [ -z "$found" ]; then
+    # one last try at repo root base
+    if [ -f "$REPO_ROOT/.claude/skills/feature-protocol/SKILL.md" ]; then
+      found="$REPO_ROOT/.claude/skills/feature-protocol/SKILL.md"
+    else
+      printf 'no SKILL.md resolvable from %s — run /bstack:rice-init\n' "$start" >&2
+      return 1
+    fi
+  fi
+
+  printf '%s\n' "$found"
+  # Chain via `extends:` frontmatter.
+  local cur="$found"
+  local seen="|$cur|"
+  while :; do
+    local ext
+    ext=$(awk '/^---$/{n++; next} n==1 && /^extends:/{sub(/^extends:[[:space:]]*/,""); gsub(/^"|"$/,""); print; exit}' "$cur")
+    [ -z "$ext" ] && break
+    # resolve relative to cur's dir
+    local curdir
+    curdir=$(dirname "$cur")
+    local resolved
+    resolved=$(cd "$curdir" && cd "$(dirname "$ext")" 2>/dev/null && printf '%s/%s\n' "$PWD" "$(basename "$ext")") || resolved=""
+    [ -z "$resolved" ] || [ ! -f "$resolved" ] && break
+    case "$seen" in *"|$resolved|"*) break ;; esac
+    printf '%s\n' "$resolved"
+    seen="${seen}${resolved}|"
+    cur="$resolved"
+  done
+}
+
+# ---------- validate ----------
+_cmd_validate() {
+  local target="${1:-}"
+  files=()
+  if [ -z "$target" ]; then
+    # default: all real SKILL.md under .claude/skills/ (skip the template marker).
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      if head -1 "$f" 2>/dev/null | grep -q 'bstack:template'; then continue; fi
+      files+=("$f")
+    done < <(find "$REPO_ROOT/.claude/skills" -type f -name 'SKILL.md' 2>/dev/null)
+    [ "${#files[@]}" -eq 0 ] && { echo "no SKILL.md found"; return 0; }
+  else
+    files=("$target")
+  fi
+
+  local hard=0
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || { printf '✗ %s: not found\n' "$f"; hard=1; continue; }
+    printf '— %s\n' "$f"
+
+    # Hard fail: required sections.
+    local missing=""
+    for sec in '^## Role' '^## Intent' '^## Context' '^## Enforcement'; do
+      grep -qE "$sec" "$f" || missing="${missing}${sec#^## } "
+    done
+    if [ -n "$missing" ]; then
+      printf '  ✗ missing sections: %s\n' "$missing"; hard=1
+    fi
+
+    # Hard fail: unfilled placeholders (skip the template itself).
+    if ! head -1 "$f" | grep -q 'bstack:template'; then
+      local ph
+      ph=$(grep -cE '\[[A-Z][A-Z0-9 _/-]+\]' "$f" || true)
+      if [ "$ph" -gt 0 ]; then
+        printf '  ✗ %d unfilled [BRACKETED] placeholder(s)\n' "$ph"; hard=1
+      fi
+    fi
+
+    # Warn: locked-stack table empty (no `| ... | ... |` rows under Context).
+    local table_rows
+    table_rows=$(awk '/^## Context/{c=1; next} c && /^## /{c=0} c && /^\|[^|]*\|[^|]*\|/' "$f" | grep -vcE '^\|[ :-]+\|' || true)
+    if [ "${table_rows:-0}" -lt 2 ]; then
+      printf '  ⚠ locked-stack table looks empty under Context\n'
+    fi
+
+    # Warn: last_reviewed > 120 days old.
+    local lr
+    lr=$(awk '/^---$/{n++; next} n==1 && /^last_reviewed:/{sub(/^last_reviewed:[[:space:]]*/,""); gsub(/^"|"$/,""); print; exit}' "$f")
+    if [ -n "$lr" ]; then
+      local age
+      age=$(python3 -c "import datetime as d; print((d.date.today()-d.date.fromisoformat('$lr')).days)" 2>/dev/null || echo "")
+      if [ -n "$age" ] && [ "$age" -gt 120 ]; then
+        printf '  ⚠ last_reviewed %s — %d days old (>120)\n' "$lr" "$age"
+      fi
+    else
+      printf '  ⚠ no last_reviewed frontmatter\n'
+    fi
+  done
+  return $hard
+}
+
+# ---------- diff ----------
+_cmd_diff() {
+  local existing="${1:-}"
+  [ -z "$existing" ] && _usage 2
+  [ -f "$existing" ] || _die "not found: $existing"
+  [ -f "$TEMPLATE" ] || _die "template missing: $TEMPLATE"
+  # Compare on section headings + Enforcement bullet count + Forbidden bullet count.
+  python3 - "$existing" "$TEMPLATE" <<'PY'
+import sys, re
+def sections(path):
+    txt = open(path).read()
+    secs = {}
+    cur = None; buf = []
+    for line in txt.splitlines():
+        m = re.match(r'^## +(.+?)\s*$', line)
+        if m:
+            if cur: secs[cur] = buf
+            cur = m.group(1); buf = []
+        elif cur is not None:
+            buf.append(line)
+    if cur: secs[cur] = buf
+    return secs
+def count_bullets(lines):
+    return sum(1 for ln in lines if re.match(r'^\s*\d+\.\s', ln) or re.match(r'^\s*-\s', ln))
+ex, tp = sys.argv[1], sys.argv[2]
+e, t = sections(ex), sections(tp)
+ek, tk = set(e), set(t)
+print(f"existing: {ex}")
+print(f"template: {tp}")
+only_template = sorted(tk - ek)
+only_existing = sorted(ek - tk)
+if only_template: print(f"+ sections template adds:    {', '.join(only_template)}")
+if only_existing: print(f"- sections only in existing: {', '.join(only_existing)}")
+for sec in ['Enforcement', 'Forbidden']:
+    e_sec = next((e[k] for k in e if sec.lower() in k.lower()), None)
+    t_sec = next((t[k] for k in t if sec.lower() in k.lower()), None)
+    if e_sec is None and t_sec is None: continue
+    ec = count_bullets(e_sec or [])
+    tc = count_bullets(t_sec or [])
+    print(f"{sec}: existing={ec} bullets, template={tc} bullets (existing keeps richer content if higher)")
+PY
+}
+
+# ---------- init ----------
+_cmd_init() {
+  # Interactive scaffold. /bstack:rice-init drives this; running it directly is fine too.
+  [ -f "$TEMPLATE" ] || _die "template missing: $TEMPLATE — repo install broken"
+
+  local base_dir="$REPO_ROOT/.claude/skills/feature-protocol"
+  local base="$base_dir/SKILL.md"
+
+  printf 'bstack-rice init — scaffolding R.I.C.E. for %s\n\n' "$REPO_ROOT"
+  if [ -f "$base" ]; then
+    printf 'base SKILL.md already exists at %s — leaving it alone.\n' "$base"
+  else
+    printf 'creating base SKILL.md at %s\n' "$base"
+    mkdir -p "$base_dir"
+    # Strip the bstack:template marker and write a minimal base scaffold.
+    sed '1{/bstack:template/d;}' "$TEMPLATE" > "$base"
+    printf '  ↳ open the file and replace [BRACKETED] placeholders.\n'
+  fi
+
+  printf '\nDetected stack signals:\n'
+  for f in nx.json package.json app.json requirements.txt pyproject.toml go.mod Podfile build.gradle Cargo.toml; do
+    [ -e "$REPO_ROOT/$f" ] && printf '  • %s\n' "$f"
+  done
+
+  # Per-app scaffold: list candidate apps under apps/ (Nx convention) or projects/
+  for parent in apps projects packages; do
+    [ -d "$REPO_ROOT/$parent" ] || continue
+    printf '\nPer-app candidates under %s/:\n' "$parent"
+    for d in "$REPO_ROOT/$parent"/*/; do
+      [ -d "$d" ] || continue
+      local app
+      app=$(basename "$d")
+      local app_skill="$d.claude/skills/${app}-feature-protocol/SKILL.md"
+      if [ -f "$app_skill" ]; then
+        printf '  ✓ %s (already has SKILL.md)\n' "$app"
+      else
+        printf '  • %s — would write %s\n' "$app" "$app_skill"
+      fi
+    done
+  done
+
+  printf '\nNext steps:\n'
+  printf '  1. Fill in placeholders in %s\n' "$base"
+  printf '  2. Run /bstack:rice-init from inside Claude Code to scaffold per-app files interactively.\n'
+  printf '  3. Run %s validate to check for missing sections / leftover placeholders.\n' "$(basename "$0")"
+}
+
+# ---------- dispatch ----------
+sub="${1:-}"; shift || true
+case "$sub" in
+  path)     _cmd_path "$@" ;;
+  validate) _cmd_validate "$@" ;;
+  diff)     _cmd_diff "$@" ;;
+  init)     _cmd_init "$@" ;;
+  ""|-h|--help|help) _usage 0 ;;
+  *) _usage 2 ;;
+esac

@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "doc_ref": "BST-UAT-0311",
+    "version": "1.0",
+    "classification": "Confidential"
+  },
+  "details": {
+    "project_product": "Orion Tenant Portal",
+    "client_org": "Vertex Realty Group",
+    "project_ref": "VRG-2025-014",
+    "uat_environment": "UAT (AWS eu-west-1)",
+    "bigstep_pm": "A. Nair",
+    "client_sponsor": "J. Whitfield",
+    "release_build": "v3.4.0-rc2 (build 512)",
+    "uat_period": "23 Jun – 04 Jul 2026"
+  },
+  "test_summary": {
+    "planned": 142,
+    "executed": 142,
+    "passed": 137,
+    "failed": 4,
+    "blocked": 1,
+    "pass_pct": "96.5%"
+  },
+  "defects": {
+    "open":   {"critical": 0, "high": 0, "medium": 2, "low": 3, "total": 5},
+    "closed": {"critical": 3, "high": 7, "medium": 12, "low": 9, "total": 31}
+  },
+  "decision": {
+    "selected": "conditions",
+    "notes": "Accepted with conditions: 2 medium defects to be fixed in the 3.4.1 patch by 25 Jul; low-priority items deferred to backlog."
+  },
+  "signoff": {
+    "client": {"name": "", "role": "Head of Product", "signature": "", "date": ""},
+    "bigstep": {"name": "", "role": "QA / Delivery Lead", "signature": "", "date": ""}
+  }
+}

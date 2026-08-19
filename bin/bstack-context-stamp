@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# bstack-context-stamp — cheap crash-recovery checkpoint, fired after every git commit.
+#
+# Why: reconstructing session state after a crash costs a full re-narration turn.
+# This stamps the recoverable facts to one small file; /bstack:context --restore
+# reads it first. Modeled on gstack's checkpoint mode ([gstack-context] commits),
+# but as a sidecar file so history stays clean.
+#
+# Writes .claude/context/last-checkpoint.md (gitignored). Never fails the hook.
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+OUT_DIR="$REPO_ROOT/.claude/context"
+mkdir -p "$OUT_DIR" 2>/dev/null || exit 0
+
+{
+  echo "# Session checkpoint (auto — bstack-context-stamp)"
+  echo ""
+  echo "- stamped: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "- branch: $(git branch --show-current 2>/dev/null)"
+  echo "- head: $(git log -1 --oneline 2>/dev/null)"
+  echo "- uncommitted: $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') files"
+  echo ""
+  echo "## Last 5 commits"
+  git log --oneline -5 2>/dev/null | sed 's/^/- /'
+  echo ""
+  echo "## Files touched in HEAD"
+  git show --stat --format='' HEAD 2>/dev/null | sed 's/^/- /' | head -20
+  echo ""
+  echo "> Restore flow: /bstack:context --restore reads this first, then any named"
+  echo "> save in .claude/context/. Decisions and next-step notes still come from"
+  echo "> named saves — this stamp covers the mechanical state only."
+} > "$OUT_DIR/last-checkpoint.md" 2>/dev/null
+
+exit 0

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# bstack-mobile-parity — flag obvious iOS↔Android capability drift per mobile app.
+#
+# SCOPE (v0.1): coarse raw-count check + the per-app "## Parity manifest" hook.
+# A full perm→purpose-string mapping is intentionally deferred until a real
+# consuming app surfaces a parity bug — extend the mapping then, not now
+# (premature mapping tables fire false signal).
+#
+# Usage: bstack-mobile-parity [app-path]
+# Exit:  0 = no drift, 2 = drift found.
+
+set -o pipefail
+cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+TARGETS=()
+if [ -n "${1:-}" ]; then
+  TARGETS+=("$1")
+else
+  while IFS= read -r line; do [ -n "$line" ] && TARGETS+=("$line"); done < <(
+    find apps -maxdepth 1 -type d \
+      \( -name 'mobile-*' -o -name 'native-android-*' -o -name 'native-ios-*' \) 2>/dev/null | sort -u)
+fi
+[ "${#TARGETS[@]}" -eq 0 ] && { echo "  (no mobile apps found)"; exit 0; }
+
+DRIFT=0
+for app in "${TARGETS[@]}"; do
+  [ -d "$app" ] || continue
+  echo ""; echo "▸ $app"
+
+  manifest=$(find "$app" -path '*/src/main/AndroidManifest.xml' 2>/dev/null | head -1)
+  plist=$(find "$app" -maxdepth 5 -name 'Info.plist' -not -path '*/Pods/*' -not -path '*/build/*' -not -path '*Tests/*' 2>/dev/null | head -1)
+  a_count=0; i_count=0
+  [ -n "$manifest" ] && a_count=$(grep -cE 'android:name="android\.permission\.' "$manifest" 2>/dev/null || echo 0)
+  [ -n "$plist" ] && i_count=$(grep -cE 'NS[A-Za-z]+UsageDescription' "$plist" 2>/dev/null || echo 0)
+  printf "  %-22s %s\n" "android.perms" "$a_count declared"
+  printf "  %-22s %s\n" "ios.purpose-strings" "$i_count declared"
+
+  if [ -f "$app/CLAUDE.md" ] && grep -qE '^##[[:space:]]+Parity manifest' "$app/CLAUDE.md"; then
+    printf "  %-22s %s\n" "parity-manifest" "present (review by hand)"
+  else
+    printf "  %-22s %s\n" "parity-manifest" "MISSING (add '## Parity manifest' in $app/CLAUDE.md)"
+    DRIFT=$((DRIFT+1))
+  fi
+  # TODO(v0.3): when a real consuming app surfaces an iOS↔Android capability
+  # drift bug in review, add the specific perm→purpose-string mapping here.
+  # Do not pre-populate from imagination — incomplete maps fire more false
+  # positives than they catch real bugs.
+done
+
+echo ""; echo "  scanned ${#TARGETS[@]} app(s); $DRIFT drift(s) (per-app parity manifest required)."
+[ "$DRIFT" -gt 0 ] && exit 2 || exit 0

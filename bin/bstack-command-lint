@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# bstack-command-lint — structural drift check for .claude/commands/bstack/*.md
+#
+# Why: 29+ hand-maintained command preambles drift (missing task tracking,
+# invalid model tiers, phantom file references). This makes the template
+# contract (docs/templates/command.md.tmpl) mechanical instead of honor-system.
+#
+# Usage: bstack-command-lint            # lint all commands
+#        bstack-command-lint <file.md>  # lint one
+# Exit 1 on any FAIL (gateable in CI and by /bstack:review).
+set -uo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+CMD_DIR="$REPO_ROOT/.claude/commands/bstack"
+VALID_MODELS="haiku sonnet opus"
+
+fails=0
+row() { printf "  %-4s  %-28s %s\n" "$1" "$2" "$3"; if [ "$1" = "FAIL" ]; then fails=$((fails+1)); fi; return 0; }
+
+lint_file() {
+  local f="$1" base stem fm
+  base=$(basename "$f"); stem="${base%.md}"
+  fm=$(awk 'NR==1 && $0=="---"{f=1;next} f && $0=="---"{exit} f{print}' "$f")
+
+  # frontmatter: name matches file stem
+  local name; name=$(echo "$fm" | sed -n 's/^name:[[:space:]]*//p' | head -1)
+  if [ "$name" = "bstack:$stem" ]; then row PASS "$base" "name matches stem"
+  else row FAIL "$base" "name '$name' != 'bstack:$stem'"; fi
+
+  # description non-empty
+  echo "$fm" | grep -q '^description:[[:space:]]*..*' \
+    && row PASS "$base" "description present" \
+    || row FAIL "$base" "description missing/empty"
+
+  # model is a valid tier alias
+  local model; model=$(echo "$fm" | sed -n 's/^model:[[:space:]]*//p' | head -1)
+  local ok=0; for m in $VALID_MODELS; do [ "$model" = "$m" ] && ok=1; done
+  if [ $ok -eq 1 ]; then row PASS "$base" "model tier: $model"
+  else row FAIL "$base" "model '$model' not in {$VALID_MODELS} — see command-conventions.md tier table"; fi
+
+  # task tracking block before first ## section
+  awk '/^## /{exit 1} /TASK TRACKING/{found=1; exit 0} END{exit found?0:1}' "$f" \
+    && row PASS "$base" "task-tracking block" \
+    || row FAIL "$base" "no '> **TASK TRACKING:**' before first ## section"
+
+  # referenced bin/ scripts and .claude config files exist (skip runtime state + placeholders)
+  local missing=""
+  while IFS= read -r p; do
+    case "$p" in
+      *YYYY*|*'<'*|.claude/state/*|.claude/context/*) continue ;;
+    esac
+    [ -e "$REPO_ROOT/$p" ] || missing="$missing $p"
+  done < <(grep -ohE '(bin/bstack-[a-z-]+|\.claude/(rules|config|hooks|overlays)/[a-zA-Z0-9._/-]+\.[a-z]+)' "$f" | sort -u)
+  if [ -z "$missing" ]; then row PASS "$base" "referenced paths exist"
+  else row FAIL "$base" "missing:$missing"; fi
+}
+
+if [ $# -ge 1 ]; then lint_file "$1"; else
+  for f in "$CMD_DIR"/*.md; do lint_file "$f"; done
+fi
+
+echo ""
+if [ "$fails" -eq 0 ]; then echo "  command-lint: all clean."; exit 0; fi
+echo "  command-lint: $fails FAIL(s) — commands drifted from docs/templates/command.md.tmpl."
+exit 1
