@@ -71,7 +71,13 @@ jobs:
           set -uo pipefail
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)"
-          CHANGED=$(git diff --name-only "$BASE"...HEAD -- '*migrations*' | grep -E '\.ts$' || true)
+          # Exclude evals/ — it holds the harness's own NEGATIVE fixtures (a migration
+          # with no down(), on purpose). setup vendors evals/ into consuming repos, so
+          # without this exclusion the gate fails on a test fixture on first install
+          # and reports a red gate for code the PR never touched.
+          CHANGED=$(git diff --name-only "$BASE"...HEAD \
+                      -- '*migrations*' ':(exclude)evals/**' ':(exclude)**/__fixtures__/**' \
+                    | grep -E '\.ts$' || true)
           if [ -z "$CHANGED" ]; then
             echo "  no migration files changed — nothing to check"
             exit 0
