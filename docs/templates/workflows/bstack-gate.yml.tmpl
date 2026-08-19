@@ -10,6 +10,11 @@
 # and the gate stops gating while still appearing green.
 #
 # bash + python3 only. bstack has no package.json; do not add a Node setup step.
+#
+# CONSUMING-REPO VARIANT. bstack-doc-drift is deliberately absent: it reconciles the
+# command surface against readme.md / MANIFEST.md, which are bstack's own indexes and
+# correctly do not exist here. Running it in a consuming repo fails 4/8 checks purely
+# from the environment.
 
 name: bstack-gate
 
@@ -42,13 +47,6 @@ jobs:
       - name: bin/bstack-eval
         run: bin/bstack-eval
 
-  doc-drift:
-    name: doc-drift
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: bin/bstack-doc-drift
-        run: bin/bstack-doc-drift
 
   ddd-boundaries:
     name: ddd-boundaries

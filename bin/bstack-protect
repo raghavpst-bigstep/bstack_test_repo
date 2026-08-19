@@ -14,6 +14,15 @@
 #   bstack-protect --apply                   provision, capturing pre-state first
 #   bstack-protect --restore <pre-file>      replay a captured pre-state (rollback)
 #
+# Flags:
+#   --repo <owner/name>   override target (default: PROJECT.md vcs-host, then git remote)
+#   --branch <name>       override branch (default: the repo's default branch)
+#   --solo                RECORDED opt-out: 0 required approvals for a one-person repo
+#   --set-contexts a,b    bind required status checks (CHK-2 phase two). The empty
+#                         string CLEARS them — the only way out of a stale required
+#                         check that no longer reports and so blocks every merge.
+#   --dry-run             print the payload that would be sent; write nothing
+#
 # Exit codes are the contract — a check that could not run is NEVER a pass (G-09):
 #   0  compliant
 #   1  non-compliant (protection present but incomplete, or absent)
@@ -34,6 +43,8 @@ BRANCH=""
 REPO=""
 RESTORE_FILE=""
 SOLO=0
+SET_CONTEXTS=""
+SET_CONTEXTS_GIVEN=0
 EVIDENCE_DIR="${BSTACK_EVIDENCE_DIR:-.bstack/evidence}"
 DRY_RUN=0
 
@@ -55,6 +66,7 @@ while [ $# -gt 0 ]; do
     --branch)  BRANCH="${2:-}"; shift ;;
     --repo)    REPO="${2:-}"; shift ;;
     --solo)    SOLO=1 ;;
+    --set-contexts) SET_CONTEXTS="${2:-}"; SET_CONTEXTS_GIVEN=1; shift ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1" ;;
@@ -261,7 +273,19 @@ if [ "$PROT_STATUS" = "200" ]; then
   fi
   check "PR-3" "stale approvals dismissed on new commits" "$DISMISS" "true"
   # PR-4 is the control that actually closes C2.2's owner!=reviewer requirement.
-  check "PR-4" "latest push approved by someone other than its author" "$LASTPUSH" "true"
+  # Under --solo it CANNOT hold (GitHub cannot require a non-author approval when zero
+  # approvals are required), so report it as an explicit WAIVER rather than either a
+  # silent pass or a permanent FAIL. A gate that can never go green gets switched off,
+  # and a gap that is silently passed is worse — so it is named, every run.
+  if [ "$SOLO" = "1" ]; then
+    printf '  WAIVE %-8s %s\n' "PR-4" "latest push approved by someone other than its author"
+    printf '        %-8s C2.2 owner!=reviewer is NOT met under --solo. Recorded in the\n' ""
+    printf '        %-8s evidence artefact as strictness=solo. Remove --solo once a\n' ""
+    printf '        %-8s second reviewer exists.\n' ""
+    FINDINGS="${FINDINGS}PR-4|latest push approved by non-author|waived (--solo)|true"$'\n'
+  else
+    check "PR-4" "latest push approved by someone other than its author" "$LASTPUSH" "true"
+  fi
   # ADM-1: without this an admin author self-merges and every rule above is cosmetic.
   check "ADM-1" "rules enforced for admins too" "$ADMINS" "true"
   check "PUSH-1" "force pushes blocked" "$FORCE" "false"
@@ -413,7 +437,8 @@ case "$MODE" in
     say "   an absent pre-file must never be read as 'there was nothing there')"
 
     PAYLOAD=$(REPO="$REPO" SOLO="$SOLO" OWNER_TYPE="$OWNER_TYPE" PROT_STATUS="$PROT_STATUS" \
-              PROT_JSON="$PROT_JSON" python3 - <<'PY'
+              PROT_JSON="$PROT_JSON" SET_CONTEXTS="$SET_CONTEXTS" \
+              SET_CONTEXTS_GIVEN="$SET_CONTEXTS_GIVEN" python3 - <<'PY'
 import json, os
 prev = {}
 if os.environ["PROT_STATUS"] == "200":
@@ -434,9 +459,18 @@ prev_rsc = prev.get("required_status_checks") or {}
 payload = {
     "required_status_checks": {
         "strict":   bool(prev_rsc.get("strict", True)),
-        # Contexts preserved verbatim. Never invented — GitHub only knows a check
-        # name after it has reported, so binding them is a later, second apply.
-        "contexts": list(prev_rsc.get("contexts") or []),
+        # Contexts are preserved verbatim by default and never invented: GitHub only
+        # knows a check name after it has reported, so binding them is a later, second
+        # apply (CHK-2 phase two) done with --set-contexts.
+        #
+        # --set-contexts is also the ONLY way to clear a stale required check. A context
+        # that no longer reports blocks every merge on the branch forever, and a
+        # preserve-only merge cannot dig you out of that hole.
+        "contexts": (
+            [c.strip() for c in os.environ["SET_CONTEXTS"].split(",") if c.strip()]
+            if os.environ["SET_CONTEXTS_GIVEN"] == "1"
+            else list(prev_rsc.get("contexts") or [])
+        ),
     },
     "enforce_admins": True,
     "required_pull_request_reviews": {
@@ -444,7 +478,11 @@ payload = {
             0 if os.environ["SOLO"] == "1"
               else max(1, int(prev_rpr.get("required_approving_review_count") or 0)),
         "dismiss_stale_reviews": True,
-        "require_last_push_approval": True,
+        # Unsatisfiable when zero approvals are required, so --solo must drop it too.
+        # This is the honest cost of the opt-out: with --solo, C2.2's owner!=reviewer
+        # requirement is NOT met. The evidence artefact records strictness=solo so the
+        # gap is visible in the audit trail rather than implied by its absence.
+        "require_last_push_approval": (os.environ["SOLO"] != "1"),
         # Left as-found: enabling it without a CODEOWNERS file blocks every merge.
         "require_code_owner_reviews": bool(prev_rpr.get("require_code_owner_reviews", False)),
     },

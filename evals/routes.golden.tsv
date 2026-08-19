@@ -1,0 +1,23 @@
+# Router golden set — prompt<TAB>expected first route (or NONE for must-stay-silent)
+# Run via: bin/bstack-eval routes. Add a row whenever a misroute is observed (P-2.6).
+implement user billing	/bstack:plan
+we need to add a new feature	/bstack:rice
+create a new screen	/bstack:rice
+build the settings page	/bstack:plan
+tweak the copy on the settings page	/bstack:plan
+rename the getUser method in the auth service	/bstack:plan
+fix this bug in checkout	/bstack:debug
+users are seeing 500 errors in production	/bstack:hotfix
+deploy to production	/bstack:deploy
+that worked, all green now	/bstack:compound
+should we build a mobile app	/bstack:office-hours
+add a column to the users table	/bstack:migrate
+what did we learn about temporal context	NONE
+/bstack:plan foo	NONE
+thanks, looks good	NONE
+run a security audit on the repo	/bstack:cso
+code health check please	/bstack:health
+review the plan before we build	/bstack:autoplan
+rename across the codebase	/bstack:refactor
+tweak the eas update channel	/bstack:hotfix
+adjust the expo update rollout	/bstack:hotfix

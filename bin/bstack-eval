@@ -16,6 +16,24 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 EVALS="$REPO_ROOT/evals"
 fails=0; total=0
 
+# Fail LOUDLY on a missing fixture tree. Without this the routes and migrate suites
+# silently contribute zero cases and the run still reports green — observed in a
+# vendored install as "eval: 1/1 green" while 20 of 21 cases never executed. A gate
+# that passes because it tested nothing is the worst possible outcome (G-09), and it
+# is the same silent-success class as the router's old `[ -f ] || exit 0`.
+if [ ! -d "$EVALS" ]; then
+  printf '  ERROR: no eval fixtures at %s\n' "$EVALS" >&2
+  printf '         The harness is incomplete, so NOTHING was verified. Not reporting green.\n' >&2
+  printf '         fix: re-run  ./setup --project .  (setup vendors evals/)\n' >&2
+  exit 1
+fi
+for _f in routes.golden.tsv migrations; do
+  if [ ! -e "$EVALS/$_f" ]; then
+    printf '  ERROR: missing eval fixture: evals/%s — refusing to report a partial run as green.\n' "$_f" >&2
+    exit 1
+  fi
+done
+
 check() { # check <name> <expected> <actual>
   total=$((total+1))
   if [ "$2" = "$3" ]; then printf "  PASS  %s\n" "$1"
