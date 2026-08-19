@@ -2,7 +2,7 @@
 name: bstack:plan
 description: '2. Implementation plan with learnings + brainstorm lookup. Outputs a plan file + ADR if needed.'
 argument-hint: '[feature/bug description or path to brainstorm]'
-model: opus
+model: claude-opus-4-7
 ---
 
 # /bstack:plan
