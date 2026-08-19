@@ -35,7 +35,7 @@ jobs:
     name: command-lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bin/bstack-command-lint
         run: bin/bstack-command-lint
 
@@ -43,7 +43,7 @@ jobs:
     name: eval
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bin/bstack-eval
         run: bin/bstack-eval
 
@@ -52,7 +52,7 @@ jobs:
     name: ddd-boundaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # --diff needs the base commit; a shallow clone has no merge base.
           fetch-depth: 0
@@ -63,7 +63,7 @@ jobs:
     name: migration-safety
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: bin/bstack-migrate-check on changed migrations
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bin/bstack-protect --verify
         env:
           GH_TOKEN: ${{ secrets.BSTACK_PROTECT_TOKEN || secrets.GITHUB_TOKEN }}
