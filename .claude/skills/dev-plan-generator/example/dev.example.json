@@ -1,0 +1,60 @@
+{
+  "meta": {"title": "Development Plan", "doc_ref": "BST-DEV-2026-041", "version": "1.0"},
+  "sheets": [
+    {
+      "name": "Tech Stack",
+      "title": "Proposed Tech Stack — Acme Loyalty",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Layer", "Technology", "Rationale"],
+         "widths": [22, 26, 40],
+         "rows": [
+           ["Frontend (web)", "React 19 + Redux Toolkit + MUI v5", "Team standard; fast, accessible admin UI"],
+           ["Mobile", "React Native + Expo", "One codebase, OTA updates, locked stack"],
+           ["Backend", "Express 5 + TypeScript (DDD)", "Domain boundaries; contract-tested APIs"],
+           ["Data", "PostgreSQL + Kysely", "Typed, reversible migrations"]
+         ]}
+      ]
+    },
+    {
+      "name": "MVP Development Plan",
+      "title": "MVP Development Plan — effort by module (man-days)",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Module", "Frontend", "Backend", "QA", "Man-days", "Man-months"],
+         "widths": [26, 12, 12, 10, 12, 12],
+         "rows": [
+           ["Auth + accounts", 6, 8, 3, 17, 0.85],
+           ["Points wallet", 8, 10, 4, 22, 1.10],
+           ["Rewards + redemption", 9, 9, 4, 22, 1.10],
+           ["Admin campaigns", 7, 6, 3, 16, 0.80]
+         ],
+         "total": {"label": "Total", "sum_cols": [2, 3, 4, 5, 6]}}
+      ]
+    },
+    {
+      "name": "Team Structure",
+      "title": "Team Structure",
+      "blocks": [
+        {"type": "table",
+         "headers": ["Role", "Allocation (FTE)", "Phase"],
+         "widths": [26, 16, 20],
+         "rows": [
+           ["Tech Architect", 0.3, "All"],
+           ["Frontend Dev", 1.0, "M1–M4"],
+           ["Backend Dev", 1.0, "M1–M4"],
+           ["QA Engineer", 0.5, "M2–M4"],
+           ["Project Manager", 0.4, "All"]
+         ]}
+      ]
+    },
+    {
+      "name": "Project Assumptions",
+      "title": "Project Assumptions",
+      "blocks": [
+        {"type": "note", "title": "Assumptions",
+         "text": "Man-months are man-days / 20. Effort excludes client-side delays. Scope is fixed for the MVP; post-MVP items are estimated at a high level and confirmed via change order."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# bstack-uninstall — remove the global bstack plugin + marketplace.
+#
+#   ./bin/uninstall            # uninstall the plugin and remove the marketplace
+#   ./bin/uninstall --purge    # also remove the Python venv (~/.bstack) and plugin cache
+#
+# Reverses ./bin/setup. Does NOT touch this git repo or your project files.
+set -uo pipefail
+
+say()  { printf '  %s\n' "$*"; }
+head() { printf '\n==> %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
+
+PURGE=0; [ "${1:-}" = "--purge" ] && PURGE=1
+
+head "Uninstalling bstack"
+if command -v claude >/dev/null 2>&1; then
+  # cover both the current (bigstep) and any legacy (bstack) marketplace names
+  for ref in bstack@bigstep bstack@bstack; do
+    claude plugin uninstall "$ref" >/dev/null 2>&1 && say "uninstalled plugin $ref" || true
+  done
+  for mp in bigstep bstack; do
+    claude plugin marketplace remove "$mp" >/dev/null 2>&1 && say "removed marketplace $mp" || true
+  done
+  say "run /reload-plugins in a running session (or restart) to drop /bstack:* from the menu"
+else
+  warn "claude CLI not found — nothing to uninstall via the plugin system."
+  # legacy fallback: undo the user-wide registrar copies
+  CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+  rm -rf "$CLAUDE_HOME/commands/bstack" 2>/dev/null && say "removed $CLAUDE_HOME/commands/bstack" || true
+fi
+
+if [ "$PURGE" -eq 1 ]; then
+  head "Purging deps + cache"
+  [ -d "$HOME/.bstack/venv" ] && { rm -rf "$HOME/.bstack/venv"; say "removed Python venv ~/.bstack/venv"; }
+  rm -rf "$HOME/.claude/plugins/cache/bigstep" "$HOME/.claude/plugins/cache/bstack" 2>/dev/null && say "cleared plugin cache" || true
+fi
+
+head "Done"
+say "bstack removed. Reinstall anytime with:  ./bin/setup"
+say "(the git repo at $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd) is untouched)"

@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "title": "Scope Reconciliation Report",
+    "subtitle": "Acme Loyalty Platform · prepared by BigStep Delivery · sources: SOW v1.0, Dev Plan v2 · evidence: Gmail threads with Acme product team, Apr–Jun 2026.",
+    "doc_ref": "BST-SCR-2026-014",
+    "version": "1.0",
+    "classification": "Confidential"
+  },
+  "sections": [
+    {
+      "heading": "MVP / Contracted Features (In Scope)",
+      "blocks": [
+        {"type": "para", "text": "Everything below is confirmed in scope per SOW v1.0, organised by functional area with the source clause referenced."},
+        {"type": "bullets", "items": [
+          "Loyalty wallet — points accrual, balance, history (SOW §2, Deliverable D1).",
+          "Rewards catalogue + redemption (SOW §2, D1).",
+          "Admin campaigns + reporting (SOW §2, D2)."
+        ]},
+        {"type": "callout", "title": "Scope-guard — contract lock-ins", "body": [
+          "Fixed-scope Phase 1; changes require a written change order (SOW §Change Control).",
+          "Third-party POS integration is explicitly Phase 2 (SOW Exclusions)."
+        ]}
+      ]
+    },
+    {
+      "heading": "Out-of-Scope / Post-MVP Features",
+      "blocks": [
+        {"type": "bullets", "items": [
+          "POS integration — deferred to Phase 2 (SOW Exclusions).",
+          "Multi-region data residency — not in Phase 1 (Dev Plan, Future Phases).",
+          "Referral engine — raised in feedback, never contracted."
+        ]}
+      ]
+    },
+    {
+      "heading": "Feedback & Email Evidence Mapped Against Scope",
+      "blocks": [
+        {"type": "subhead", "text": "Add referral bonuses — 2026-05-12"},
+        {"type": "para", "text": "Acme requested a referral-bonus flow. Assessment: Out of Scope — CR Needed. Not in SOW §2 scope nor the Dev Plan; a new workstream requiring estimate + change order."},
+        {"type": "subhead", "text": "Wallet shows wrong balance after redemption — 2026-06-03"},
+        {"type": "para", "text": "Reported by Acme QA. Assessment: In Scope — Defect. Wallet accuracy is a D1 acceptance criterion; fix within contracted scope, no CR."}
+      ]
+    },
+    {
+      "heading": "Change Order Activity (Vendor Communications)",
+      "blocks": [
+        {"type": "bullets", "items": [
+          "Formal CRs raised: none to date.",
+          "Informal absorptions: minor copy + theme tweaks accepted into Sprint 4 without CR paperwork.",
+          "Timeline: M3 shifted +1 week, client-driven (delayed UAT feedback) — documented in email 2026-06-10.",
+          "Process flag: referral request (2026-05-12) discussed but not yet formalised as a CR."
+        ]}
+      ]
+    },
+    {
+      "heading": "Summary Flags Table",
+      "blocks": [
+        {"type": "table",
+         "headers": ["#", "Item", "Source (doc/email + date)", "Classification"],
+         "widths_in": [0.4, 2.6, 2.4, 1.5],
+         "rows": [
+           ["1", "Referral bonuses", "Email 2026-05-12", "Out of Scope — CR Needed"],
+           ["2", "Wallet balance after redemption", "Email 2026-06-03", "In Scope — Defect"],
+           ["3", "Theme/copy tweaks (Sprint 4)", "Sprint notes 2026-05", "Process Flag"],
+           ["4", "M3 timeline +1 week", "Email 2026-06-10", "In Scope — Pending"]
+         ]}
+      ]
+    },
+    {
+      "heading": "Overarching Observations",
+      "blocks": [
+        {"type": "bullets", "items": [
+          "Change-control compliance is weak — one clear CR candidate (referrals) is still informal.",
+          "Timeline drift is documented as client-driven, which protects the delivery position.",
+          "The wallet-balance issue should be pushed back as a defect, not absorbed as a change.",
+          "Commercial exposure is limited so far, but absorbed tweaks should be logged before they compound."
+        ]}
+      ]
+    }
+  ]
+}

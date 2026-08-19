@@ -1,0 +1,42 @@
+# bstack intent router — single source of truth for auto-routing.
+# Format:  <ERE pattern (lowercase)> <TAB> <command> <TAB> <intent note>
+# The UserPromptSubmit hook (.claude/hooks/route.sh) matches each plain prompt
+# against these patterns and injects the matching command(s) as a routing hint.
+# CLAUDE.md hard rule 6 makes acting on that hint a contract.
+# Order = priority: put the most specific intents first. One command per row.
+# Edit ONCE here — the hook reads this file; nothing hardcodes the table.
+#
+# pattern	command	note
+production (is )?down|outage|sev[12]|incident|urgent.*(prod|fix)|customer.*broken|(users?|customers?) (are )?(seeing|getting|hitting) .*(error|5[0-9][0-9]|crash)|(error|5[0-9][0-9]|crash).* in (prod|production|live)	/bstack:hotfix	emergency prod fix — diagnose, fix, test, PR, notify in one pass
+(that|it) (worked|works|is fixed)|fixed (it|now)|solved|finally working|all green	/bstack:compound	a fix just landed — capture it so the next occurrence takes minutes
+\b(bug|error|exception|stack ?trace|traceback|crash|failing|throws|broken|regression)\b	/bstack:debug	runtime/logic bug — evidence (Datadog + solutions) before hypotheses
+migrat|schema change|add (a )?column|alter table|drop column|create index|backfill	/bstack:migrate	schema/data change — reversibility, locking, idempotency verified
+\b(review|look at|feedback on|check) (my |this |the )?(code|pr|diff|branch|changes)\b	/bstack:review	multi-agent review — scope detect, parallel reviewers, triaged findings
+\b(ota|eas ?update|codepush|expo ?update)\b	/bstack:hotfix	mobile OTA hotfix — bypass store, rollback note required
+\b(deploy|release|roll ?out|push to (prod|staging))\b	/bstack:deploy	deploy with pre-flight, canary, rollback ready
+\b(ship|open (a )?pr|raise (a )?pr|merge)\b	/bstack:ship	tests, VERSION bump, CHANGELOG, push, PR
+\b(ci[ /-]?cd|ci pipeline|github actions?|build (a |the )?pipeline|nx affected|release automation|local (dev )?(env|environment|stack)|bring up the (stack|services)|docker.?compose)\b	/bstack:devops	CI/CD pipeline + local dev environment work (deploys stay in /bstack:deploy)
+\b(improve bstack|audit (the )?(commands?|toolkit)|bstack (drift|cleanup|lint)|sync (the )?(commands?|docs?|manifest|readme)|fix (the )?readme|check (the )?readme)\b	/bstack:improve	self-maintenance — command/skill/doc lint, drift, README prose
+\b(set ?up bstack|bootstrap bstack|version control setup|enable auto.?upgrade|keep bstack (updated|current)|configure model tiers?)\b	/bstack:setup	local bootstrap — version control, auto-upgrade, model auto-selection
+\brefactor|clean ?up|restructure|extract|rename across|tidy\b	/bstack:refactor	behavior-preserving refactor — characterization tests, green-to-green steps
+\b(qa|e2e|end.to.end|test the (ui|flow|page)|playwright)\b	/bstack:qa	diff-aware QA against the running frontend
+\bspec|contract|acceptance criteria|inputs? and outputs?|define the (api|behavior)\b	/bstack:spec	pin the precise contract before planning
+\b(strategy|direction|roadmap|what should we (focus|build|prioriti)|the bet)\b	/bstack:strategy	set/refresh product direction — the bet, the wedge, the not-doing list
+\b(idea|should we build|not sure what|explore (whether|if)|is it worth|wedge)\b	/bstack:office-hours	ambiguous/big idea — interrogate premises, find the wedge BEFORE planning
+\b(brainstorm|explore (approaches|options)|think through|weigh|trade.?offs?)\b	/bstack:brainstorm	diverge on approaches, pick one, document the trade-off
+\bnew (screen|feature|endpoint|component|hook|module|service|repository|store slice|page|route)\b	/bstack:rice	R.I.C.E. architect gate — ask R/I/C/E questions BEFORE planning new feature work
+(auto( |-)?review|review) (the |my )?plan|autoplan	/bstack:autoplan	full multi-lens plan review with auto-decisions, one final gate
+\b(implement|build|add (a |an )?(new )?(feature|endpoint|component|service|screen|page)|write (the )?code|create (a |an |the )?(new )?(feature|endpoint|component|service|screen|page)|make it)\b	/bstack:plan	implementation request → PLAN first (separate planning from coding), then /bstack:implement
+\b(plan|how should i|how do we|design the|break (this )?down|approach for)\b	/bstack:plan	produce a structured plan → input to /bstack:implement
+\b(debug|diagnose|why (is|does|isn.t)|root cause|investigate)\b	/bstack:debug	structured diagnosis with institutional memory
+\b(scrape|extract data from|pull data from) .*(page|site|url)\b	/bstack:scrape	read-only structured extraction from a web page
+\b(retro|retrospective|what (shipped|broke) this week)\b	/bstack:retro	weekly engineering retrospective
+\b(save|restore) (context|session)|pick up where|resume work\b	/bstack:context	save/restore working session context
+\b(app ?store|testflight|play ?store|play ?console|asc|aab|ipa|apk|appstoreconnect)\b	/bstack:mobile-release	mobile store release — version bump, staged rollout, crash-free gate
+\b(android|kotlin|jetpack ?compose|androidmanifest|gradle|targetsdk|minsdk)\b	/bstack:plan	android work → PLAN first (locked stack, manifest review, perm gating)
+\b(ios|swift(ui)?|xcode|info\.?plist|entitlement|cocoapods?|spm|swift package)\b	/bstack:plan	ios work → PLAN first (locked stack, ATS, keychain, entitlements)
+\b(react ?native|expo|metro|hermes|new arch(itecture)?)\b	/bstack:plan	react-native work → PLAN first (locked stack, native modules, OTA)
+\b(mobile|on the (phone|device)|native app|cross.?platform)\b	/bstack:plan	mobile work → PLAN first (mobile rules + manifest reviewer fire on review)
+security (audit|review|posture)|owasp|stride|pen ?test|is (this|the repo) secure	/bstack:cso	system-level security audit — OWASP + STRIDE + secrets
+(code )?(health|quality) (check|dashboard|report)|how healthy is|tech ?debt (report|check)	/bstack:health	quality dashboard with trend tracking
+\b(tweak|rename|reword|adjust|edit) (the|this|a|an|my) [a-z]	/bstack:plan	small code/copy edit → PLAN first (planning precedes coding, hard rule 6)

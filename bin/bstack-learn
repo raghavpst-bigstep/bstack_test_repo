@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# bstack-learn — log, search, and manage project learnings.
+#
+# Storage: docs/solutions/learnings.jsonl (append-only JSON Lines, git-committed).
+# Each entry: {ts, type, key, insight, confidence, source, files?, skill?, rule?}
+#
+# Commands:
+#   bstack-learn log '<json>'           append a learning
+#   bstack-learn recent [N]             show last N (default 20)
+#   bstack-learn search '<query>'       grep insight + key
+#   bstack-learn stats                  counts by type / source
+#   bstack-learn export                 markdown for CLAUDE.md / docs
+#   bstack-learn prune                  list candidates (stale file refs, dup keys)
+#   bstack-learn count                  print just the count (for SessionStart)
+set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+LEARN_DIR="$REPO_ROOT/docs/solutions"
+LEARN_FILE="$LEARN_DIR/learnings.jsonl"
+
+mkdir -p "$LEARN_DIR"
+touch "$LEARN_FILE"
+
+cmd="${1:-recent}"
+shift || true
+
+case "$cmd" in
+  log)
+    PAYLOAD="${1:-}"
+    if [ -z "$PAYLOAD" ]; then
+      echo "usage: bstack-learn log '<json>'" >&2
+      exit 1
+    fi
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
+    # Inject ts + branch if not provided
+    printf '%s\n' "$PAYLOAD" | python3 -c "
+import json, sys
+e = json.loads(sys.stdin.read())
+e.setdefault('ts', '$TS')
+e.setdefault('branch', '$BRANCH')
+e.setdefault('type', 'pattern')
+e.setdefault('confidence', 5)
+e.setdefault('source', 'observed')
+print(json.dumps(e))
+" >> "$LEARN_FILE"
+    echo "logged: $(tail -1 "$LEARN_FILE" | python3 -c 'import json,sys; e=json.loads(sys.stdin.read()); print(e.get("key","?"),"—",e.get("insight","?")[:80])')"
+    ;;
+
+  recent)
+    N="${1:-20}"
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo "No learnings yet. Run /bstack:compound after fixing something to start the wiki."
+      exit 0
+    fi
+    tail -n "$N" "$LEARN_FILE" | python3 -c "
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        e = json.loads(line)
+        ts = e.get('ts','')[:10]
+        t = e.get('type','?')
+        k = e.get('key','?')
+        ins = e.get('insight','')[:120]
+        c = e.get('confidence','?')
+        print(f'{ts}  [{t:12}] {k:30}  {ins}  (conf {c})')
+    except Exception:
+        pass
+"
+    ;;
+
+  search)
+    Q="${1:-}"
+    if [ -z "$Q" ]; then
+      echo "usage: bstack-learn search '<query>'" >&2
+      exit 1
+    fi
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo "No learnings yet."
+      exit 0
+    fi
+    python3 -c "
+import json, sys, re
+q = re.compile(r'$Q', re.IGNORECASE)
+hits = 0
+with open('$LEARN_FILE') as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try:
+            e = json.loads(line)
+            blob = ' '.join(str(v) for v in e.values())
+            if q.search(blob):
+                hits += 1
+                print(f\"{e.get('ts','')[:10]}  [{e.get('type','?'):12}] {e.get('key','?'):30}  {e.get('insight','')[:140]}\")
+        except Exception:
+            pass
+print(f'\n{hits} match(es).')
+"
+    ;;
+
+  stats)
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo "No learnings yet."
+      exit 0
+    fi
+    python3 -c "
+import json
+from collections import Counter
+by_type, by_source, confs = Counter(), Counter(), []
+unique = {}
+with open('$LEARN_FILE') as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try:
+            e = json.loads(line)
+            key = (e.get('key',''), e.get('type',''))
+            unique[key] = e  # latest wins
+        except Exception:
+            pass
+for e in unique.values():
+    by_type[e.get('type','?')] += 1
+    by_source[e.get('source','?')] += 1
+    if isinstance(e.get('confidence'), (int, float)):
+        confs.append(e['confidence'])
+print(f'unique entries: {len(unique)}')
+print(f'by type:    {dict(by_type)}')
+print(f'by source:  {dict(by_source)}')
+print(f'avg conf:   {(sum(confs)/len(confs)):.1f}' if confs else 'avg conf:   n/a')
+"
+    ;;
+
+  count)
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo 0
+    else
+      wc -l < "$LEARN_FILE" | tr -d ' '
+    fi
+    ;;
+
+  export)
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo "No learnings yet."
+      exit 0
+    fi
+    python3 -c "
+import json
+from collections import defaultdict
+buckets = defaultdict(list)
+unique = {}
+with open('$LEARN_FILE') as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try:
+            e = json.loads(line)
+            key = (e.get('key',''), e.get('type',''))
+            unique[key] = e
+        except Exception:
+            pass
+for e in unique.values():
+    buckets[e.get('type','other').title()].append(e)
+print('# Project Learnings\n')
+print('_Auto-generated from \`docs/solutions/learnings.jsonl\` via \`bstack-learn export\`._\n')
+for section in ['Pattern','Pitfall','Architecture','Preference','Operational','Other']:
+    items = buckets.get(section, []) + buckets.get(section.lower(), [])
+    if not items: continue
+    print(f'## {section}s\n')
+    for e in sorted(items, key=lambda x: -(x.get('confidence') or 0)):
+        k = e.get('key','?')
+        ins = e.get('insight','')
+        c = e.get('confidence','?')
+        rule = e.get('rule')
+        rule_suffix = f' (rule {rule})' if rule else ''
+        print(f'- **{k}** — {ins} _(confidence {c}/10{rule_suffix})_')
+    print()
+"
+    ;;
+
+  prune)
+    if [ ! -s "$LEARN_FILE" ]; then
+      echo "No learnings yet."
+      exit 0
+    fi
+    python3 -c "
+import json, os
+from collections import defaultdict
+by_key = defaultdict(list)
+all_entries = []
+with open('$LEARN_FILE') as f:
+    for i, line in enumerate(f):
+        line = line.strip()
+        if not line: continue
+        try:
+            e = json.loads(line)
+            e['_lineno'] = i+1
+            all_entries.append(e)
+            by_key[e.get('key','')].append(e)
+        except Exception:
+            pass
+
+print('=== STALE (referenced files missing) ===')
+stale = 0
+for e in all_entries:
+    files = e.get('files') or []
+    if not isinstance(files, list): continue
+    missing = [f for f in files if not os.path.exists(os.path.join('$REPO_ROOT', f))]
+    if missing:
+        stale += 1
+        print(f\"  line {e['_lineno']}  key={e.get('key','?'):24}  missing: {missing}\")
+if not stale: print('  (none)')
+
+print()
+print('=== CONFLICTS (same key, different insight) ===')
+conflicts = 0
+for key, entries in by_key.items():
+    if not key: continue
+    insights = {e.get('insight','') for e in entries}
+    if len(insights) > 1:
+        conflicts += 1
+        print(f'  key={key}')
+        for e in entries:
+            print(f\"    line {e['_lineno']}  ({e.get('ts','')[:10]}, conf {e.get('confidence','?')}): {e.get('insight','')[:100]}\")
+if not conflicts: print('  (none)')
+
+print()
+print('=== DUPLICATES (same key, same insight, multiple entries) ===')
+dups = 0
+for key, entries in by_key.items():
+    if not key or len(entries) < 2: continue
+    insights = {e.get('insight','') for e in entries}
+    if len(insights) == 1:
+        dups += 1
+        lines = [e['_lineno'] for e in entries]
+        print(f'  key={key}  appears {len(entries)} times at lines {lines}')
+if not dups: print('  (none)')
+"
+    echo
+    echo "To remove an entry, edit $LEARN_FILE directly (it's git-tracked)."
+    ;;
+
+  *)
+    echo "usage: bstack-learn {log|recent|search|stats|count|export|prune}" >&2
+    exit 1
+    ;;
+esac
